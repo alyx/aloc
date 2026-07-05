@@ -288,6 +288,34 @@ func TestExtraVerboseTracesEveryDecision(t *testing.T) {
 	}
 }
 
+func TestTripleVerboseListsCountedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"main.go":   "package main\n",
+		"tool.py":   "x = 1\n",
+		"skip.xyz":  "?\n",
+		"README.md": "# hi\n",
+	})
+	code, out, errOut := runCLI(t, root, "--no-config", "-vvv", ".")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	for _, want := range []string{
+		"count main.go (Go)",
+		"count tool.py (Python)",
+		"count README.md (Markdown)",
+		"skip skip.xyz (unknown language)", // -vvv implies -vv
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("-vvv stderr missing %q\ngot:\n%s", want, errOut)
+		}
+	}
+	// Diagnostics stay on stderr; stdout is only the report.
+	if strings.Contains(out, "count main.go") {
+		t.Error("file listing leaked to stdout")
+	}
+}
+
 func TestOutputFile(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{"a.go": "package a\n"})

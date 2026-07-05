@@ -54,6 +54,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		listDet   = fs.Bool("list-detectors", false, "list smart-exclusion detectors and exit")
 		verbose   = fs.Bool("verbose", false, "print warnings and applied smart exclusions to stderr")
 		trace     = fs.Bool("vv", false, "explain every skip decision — gitignore, patterns, hidden, filters (implies -v)")
+		traceAll  = fs.Bool("vvv", false, "also list every counted file and its detected language (implies -vv)")
 		version   = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Var(&excludes, "exclude", "exclude `pattern` (repeatable)")
@@ -202,9 +203,14 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		roots = []string{"."}
 	}
 
+	if *traceAll {
+		*trace = true
+	}
 	if *trace {
 		*verbose = true
 	}
+	// All diagnostics go to stderr, terminal or not, so piping or -o always
+	// yields a clean report.
 	var warn, traceFn func(string, ...any)
 	if *verbose {
 		warn = func(f string, args ...any) { fmt.Fprintf(stderr, "aloc: "+f+"\n", args...) }
@@ -230,6 +236,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		ByFile:         useByFile,
 		Warn:           warn,
 		Trace:          traceFn,
+		TraceFiles:     *traceAll,
 	})
 	if err != nil {
 		return fail(err)

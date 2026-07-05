@@ -49,6 +49,7 @@ aloc [flags] [path ...]        # default path: .
 | `--list-languages` / `--list-detectors` | show what's built in |
 | `-v, --verbose` | warnings + applied smart exclusions on stderr |
 | `-vv` | explain **every** skip decision: gitignore rule (with source file), exclude pattern, hidden, symlink, filters, unknown language (implies `-v`) |
+| `-vvv` | also list every counted file and its detected language, after all filters (implies `-vv`) |
 
 ## Smart exclusion
 
@@ -123,6 +124,10 @@ Rules for `--exclude`/`--include`, checked in this order:
 segments (including zero). Matching a directory matches its whole subtree.
 Excludes always win over includes. When multiple roots are given, patterns
 are evaluated relative to each root.
+
+All `-v`/`-vv`/`-vvv` diagnostics go to **stderr**, terminal or not, so
+stdout is always just the report — `aloc -f json -vvv . | jq` works, and
+`2> decisions.log` captures the trace separately.
 
 Defaults: hidden files/directories are skipped (`--hidden` to include),
 `.gitignore` files are respected with full semantics — anchoring, `!`

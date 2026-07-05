@@ -41,6 +41,7 @@ type Options struct {
 	ByFile         bool
 	Warn           func(format string, args ...any) // may be nil
 	Trace          func(format string, args ...any) // per-decision log; may be nil
+	TraceFiles     bool                             // also Trace every counted file and its language
 }
 
 type job struct {
@@ -400,6 +401,9 @@ func (w *walker) countFile(j job) {
 	if counter.IsBinary(content) {
 		w.warnf("skipping binary file %s", j.display)
 		return
+	}
+	if w.opts.TraceFiles {
+		w.tracef("count %s (%s)", j.display, l.Name)
 	}
 	res := result{language: l.Name, display: j.display, stats: counter.Count(content, l)}
 	if w.opts.Dedup {
