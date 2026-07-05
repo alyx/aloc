@@ -1,0 +1,72 @@
+package lang
+
+// Shared delimiter sets.
+var (
+	cComments   = [][2]string{{"/*", "*/"}}
+	dq          = [][2]string{{`"`, `"`}}
+	dqsq        = [][2]string{{`"`, `"`}, {`'`, `'`}}
+	htmlComment = [][2]string{{"<!--", "-->"}}
+)
+
+// builtin is the default language set. Kept alphabetical by name.
+var builtin = []Language{
+	{Name: "Assembly", Extensions: []string{"s", "asm"}, LineComments: []string{";", "#", "//"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "Batch", Extensions: []string{"bat", "cmd"}, LineComments: []string{"::", "REM ", "rem ", "@REM ", "@rem "}},
+	{Name: "C", Extensions: []string{"c", "h"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "C#", Extensions: []string{"cs", "csx"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq},
+	{Name: "C++", Extensions: []string{"cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "ino"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "CMake", Extensions: []string{"cmake"}, Filenames: []string{"CMakeLists.txt"}, LineComments: []string{"#"}, BlockComments: [][2]string{{"#[[", "]]"}}, Quotes: dq},
+	{Name: "CSS", Extensions: []string{"css"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "Clojure", Extensions: []string{"clj", "cljs", "cljc", "edn"}, LineComments: []string{";"}, Quotes: dq},
+	{Name: "D", Extensions: []string{"d"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq},
+	{Name: "Dart", Extensions: []string{"dart"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq, MultiQuotes: [][2]string{{`"""`, `"""`}, {`'''`, `'''`}}},
+	{Name: "Dockerfile", Extensions: []string{"dockerfile"}, Filenames: []string{"Dockerfile", "Containerfile"}, LineComments: []string{"#"}, Quotes: dqsq},
+	{Name: "Elixir", Extensions: []string{"ex", "exs"}, Shebangs: []string{"elixir"}, LineComments: []string{"#"}, Quotes: dqsq, MultiQuotes: [][2]string{{`"""`, `"""`}}},
+	{Name: "Erlang", Extensions: []string{"erl", "hrl"}, LineComments: []string{"%"}, Quotes: dq},
+	{Name: "F#", Extensions: []string{"fs", "fsi", "fsx"}, LineComments: []string{"//"}, BlockComments: [][2]string{{"(*", "*)"}}, Quotes: dq, Nested: true},
+	{Name: "Fortran", Extensions: []string{"f", "f77", "f90", "f95", "f03", "f08"}, LineComments: []string{"!"}, Quotes: dqsq},
+	{Name: "GraphQL", Extensions: []string{"graphql", "gql"}, LineComments: []string{"#"}, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}},
+	{Name: "Go", Extensions: []string{"go"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq, RawQuotes: [][2]string{{"`", "`"}}},
+	{Name: "Groovy", Extensions: []string{"groovy", "gradle"}, Filenames: []string{"Jenkinsfile"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq, MultiQuotes: [][2]string{{`"""`, `"""`}, {`'''`, `'''`}}},
+	{Name: "HCL", Extensions: []string{"tf", "tfvars", "hcl"}, LineComments: []string{"#", "//"}, BlockComments: cComments, Quotes: dq},
+	{Name: "HTML", Extensions: []string{"html", "htm", "xhtml"}, BlockComments: htmlComment, Quotes: dqsq},
+	{Name: "Haskell", Extensions: []string{"hs", "lhs"}, LineComments: []string{"--"}, BlockComments: [][2]string{{"{-", "-}"}}, Quotes: dq, Nested: true},
+	{Name: "INI", Extensions: []string{"ini", "cfg"}, LineComments: []string{";", "#"}},
+	{Name: "JSON", Extensions: []string{"json", "geojson"}, Quotes: dq},
+	{Name: "Java", Extensions: []string{"java"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}},
+	{Name: "JavaScript", Extensions: []string{"js", "mjs", "cjs", "jsx"}, Shebangs: []string{"node", "nodejs", "deno", "bun"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq, RawQuotes: [][2]string{{"`", "`"}}},
+	{Name: "Julia", Extensions: []string{"jl"}, Shebangs: []string{"julia"}, LineComments: []string{"#"}, BlockComments: [][2]string{{"#=", "=#"}}, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}, Nested: true},
+	{Name: "Kotlin", Extensions: []string{"kt", "kts"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}, Nested: true},
+	{Name: "LaTeX", Extensions: []string{"tex", "sty", "cls"}, LineComments: []string{"%"}},
+	{Name: "Less", Extensions: []string{"less"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "Lua", Extensions: []string{"lua"}, Shebangs: []string{"lua"}, LineComments: []string{"--"}, BlockComments: [][2]string{{"--[[", "]]"}}, Quotes: dqsq},
+	{Name: "Makefile", Extensions: []string{"mk", "mak"}, Filenames: []string{"Makefile", "makefile", "GNUmakefile"}, LineComments: []string{"#"}, Quotes: dqsq},
+	{Name: "Markdown", Extensions: []string{"md", "markdown"}, BlockComments: htmlComment},
+	{Name: "Nim", Extensions: []string{"nim", "nims"}, LineComments: []string{"#"}, BlockComments: [][2]string{{"#[", "]#"}}, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}, Nested: true},
+	{Name: "OCaml", Extensions: []string{"ml", "mli"}, BlockComments: [][2]string{{"(*", "*)"}}, Quotes: dq, Nested: true},
+	{Name: "Objective-C", Extensions: []string{"m", "mm"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq},
+	{Name: "PHP", Extensions: []string{"php", "php3", "php4", "php5", "phtml"}, Shebangs: []string{"php"}, LineComments: []string{"//", "#"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "Pascal", Extensions: []string{"pas", "pp"}, LineComments: []string{"//"}, BlockComments: [][2]string{{"{", "}"}, {"(*", "*)"}}, Quotes: [][2]string{{"'", "'"}}},
+	{Name: "Perl", Extensions: []string{"pl", "pm", "t"}, Shebangs: []string{"perl"}, LineComments: []string{"#"}, BlockComments: [][2]string{{"=pod", "=cut"}}, Quotes: dqsq},
+	{Name: "PowerShell", Extensions: []string{"ps1", "psm1", "psd1"}, Shebangs: []string{"pwsh", "powershell"}, LineComments: []string{"#"}, BlockComments: [][2]string{{"<#", "#>"}}, Quotes: dqsq},
+	{Name: "Properties", Extensions: []string{"properties"}, LineComments: []string{"#", "!"}},
+	{Name: "Protobuf", Extensions: []string{"proto"}, LineComments: []string{"//"}, Quotes: dq},
+	{Name: "Python", Extensions: []string{"py", "pyw", "pyi"}, Shebangs: []string{"python"}, LineComments: []string{"#"}, Quotes: dqsq, MultiQuotes: [][2]string{{`"""`, `"""`}, {`'''`, `'''`}}},
+	{Name: "R", Extensions: []string{"r", "rmd"}, Shebangs: []string{"Rscript"}, LineComments: []string{"#"}, Quotes: dqsq},
+	{Name: "Ruby", Extensions: []string{"rb", "rake", "gemspec", "ru"}, Filenames: []string{"Rakefile", "Gemfile", "Vagrantfile"}, Shebangs: []string{"ruby"}, LineComments: []string{"#"}, BlockComments: [][2]string{{"=begin", "=end"}}, Quotes: dqsq},
+	{Name: "Rust", Extensions: []string{"rs"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq, Nested: true},
+	{Name: "SCSS", Extensions: []string{"scss"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq},
+	{Name: "SQL", Extensions: []string{"sql"}, LineComments: []string{"--"}, BlockComments: cComments, Quotes: [][2]string{{"'", "'"}}},
+	{Name: "Scala", Extensions: []string{"scala", "sbt"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}},
+	{Name: "Shell", Extensions: []string{"sh", "bash", "zsh", "ksh"}, Filenames: []string{".bashrc", ".zshrc", ".profile"}, Shebangs: []string{"sh", "bash", "zsh", "ksh", "dash", "fish"}, LineComments: []string{"#"}, Quotes: dqsq},
+	{Name: "Svelte", Extensions: []string{"svelte"}, BlockComments: append(htmlComment, cComments...), LineComments: []string{"//"}, Quotes: dqsq},
+	{Name: "Swift", Extensions: []string{"swift"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dq, MultiQuotes: [][2]string{{`"""`, `"""`}}, Nested: true},
+	{Name: "TOML", Extensions: []string{"toml"}, LineComments: []string{"#"}, Quotes: dqsq, MultiQuotes: [][2]string{{`"""`, `"""`}}, RawQuotes: [][2]string{{"'''", "'''"}}},
+	{Name: "Plain Text", Extensions: []string{"txt", "text"}},
+	{Name: "TypeScript", Extensions: []string{"ts", "tsx", "mts", "cts"}, LineComments: []string{"//"}, BlockComments: cComments, Quotes: dqsq, RawQuotes: [][2]string{{"`", "`"}}},
+	{Name: "Vim Script", Extensions: []string{"vim"}, Filenames: []string{".vimrc"}, LineComments: []string{`"`}},
+	{Name: "Vue", Extensions: []string{"vue"}, BlockComments: append(htmlComment, cComments...), LineComments: []string{"//"}, Quotes: dqsq},
+	{Name: "XML", Extensions: []string{"xml", "xsd", "xsl", "svg", "plist", "csproj", "fsproj", "vbproj"}, BlockComments: htmlComment, Quotes: dqsq},
+	{Name: "YAML", Extensions: []string{"yml", "yaml"}, LineComments: []string{"#"}, Quotes: dqsq},
+	{Name: "Zig", Extensions: []string{"zig"}, LineComments: []string{"//"}, Quotes: dq},
+}
