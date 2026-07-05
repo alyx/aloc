@@ -3,6 +3,7 @@ package walker
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -223,6 +224,64 @@ func TestWalkSmartExclusionOutranksGitignore(t *testing.T) {
 	}
 	if len(rep.Excluded) != 1 || rep.Excluded[0].Path != "node_modules" || rep.Excluded[0].Detector != "node" {
 		t.Errorf("excluded = %+v, want node_modules attributed to the node detector", rep.Excluded)
+	}
+}
+
+func TestWalkTracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable:", err)
+	}
+	root := t.TempDir()
+	files := map[string]string{
+		"main.go":                       "package main\n",
+		"untracked.go":                  "package untracked\n",
+		"scratch/notes.py":              "x = 1\n",
+		"composer.json":                 "{}\n",
+		"vendor/lib.php":                "<?php\n",
+		"web/node_modules/dep/index.js": "x\n",
+	}
+	for path, content := range files {
+		abs := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Track everything except untracked.go, scratch/, and node_modules —
+	// including vendor/, to prove smart exclusion still applies after the
+	// tracked filter.
+	for _, args := range [][]string{
+		{"init", "-q"},
+		// -f so a developer's global gitignore can't break the fixture.
+		{"add", "-f", "main.go", "composer.json", "vendor/lib.php"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	t.Chdir(root)
+	rep := run(t, Options{Roots: []string{"."}, Tracked: true})
+
+	if g := langStats(rep, "Go"); g == nil || g.Files != 1 {
+		t.Errorf("Go = %+v, want only tracked main.go", g)
+	}
+	if py := langStats(rep, "Python"); py != nil {
+		t.Errorf("untracked scratch/ should be pruned, got %+v", py)
+	}
+	if p := langStats(rep, "PHP"); p != nil {
+		t.Errorf("committed vendor/ should still be smart-excluded, got %+v", p)
+	}
+	if len(rep.Excluded) != 1 || rep.Excluded[0] != (report.Excluded{Path: "vendor", Detector: "composer"}) {
+		t.Errorf("excluded = %+v, want committed vendor attributed to composer", rep.Excluded)
+	}
+
+	// A root outside any git repository is a hard error.
+	if _, err := Run(Options{Roots: []string{t.TempDir()}, Tracked: true}); err == nil {
+		t.Error("--tracked outside a git repo should fail")
 	}
 }
 

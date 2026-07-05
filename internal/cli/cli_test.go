@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -203,6 +204,36 @@ func TestVerboseWarnings(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "binary") {
 		t.Errorf("verbose should warn about binary files, stderr: %q", errOut)
+	}
+}
+
+func TestEndToEndTracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable:", err)
+	}
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"tracked.go":   "package a\n",
+		"untracked.go": "package b\n",
+	})
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-f", "tracked.go"}} {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	code, out, errOut := runCLI(t, root, "--no-config", "--tracked", "-f", "json", ".")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if r := decode(t, out); r.Totals.Files != 1 {
+		t.Errorf("totals = %+v, want only the tracked file", r.Totals)
+	}
+
+	outside := t.TempDir()
+	if code, _, errOut := runCLI(t, outside, "--no-config", "--tracked", "."); code != 1 || !strings.Contains(errOut, "git") {
+		t.Errorf("--tracked outside a repo: code %d, stderr %q", code, errOut)
 	}
 }
 

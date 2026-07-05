@@ -40,6 +40,7 @@ aloc [flags] [path ...]        # default path: .
 | `--no-smart` | disable smart ecosystem exclusion |
 | `--no-detect node,rust` | disable individual detectors |
 | `--no-gitignore` | don't respect `.gitignore` files |
+| `--tracked` | count only files tracked by git (see below) |
 | `--hidden` | count hidden files/directories |
 | `--follow-symlinks` | follow symlinks (loop-safe) |
 | `-j, --jobs <n>` | parallel workers (default: CPU count) |
@@ -129,6 +130,21 @@ disable). Binary files are detected by NUL sniffing and skipped. Symlinks are
 not followed unless `--follow-symlinks` is set, and are cycle- and
 duplicate-safe when it is.
 
+### `--tracked`
+
+`--tracked` restricts counting to files in the git index (`git ls-files`) of
+each path's repository — a hard filter applied **before** smart exclusion, so
+untracked trees are pruned outright while a *committed* `vendor/` or
+`node_modules/` still gets smart-excluded and attributed to its detector.
+Each scan path may belong to a different repository; scanning a subdirectory
+uses only that subtree of its repo. A path outside any git repository (or a
+missing `git` binary) is a hard error.
+
+It composes with the other rules as a pure filter: hidden files (`.github/`)
+are still skipped unless you add `--hidden`, and excludes/includes still
+apply. Git submodule contents are not counted — they belong to their own
+repository's tree.
+
 ## Config file
 
 Searched in order: `--config <file>`, `./.aloc.yml`, `./.aloc.yaml`,
@@ -139,6 +155,7 @@ Searched in order: `--config <file>`, `./.aloc.yml`, `./.aloc.yaml`,
 format: table
 smart_exclude: true
 gitignore: true
+tracked: false
 hidden: false
 follow_symlinks: false
 by_file: false

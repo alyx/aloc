@@ -44,6 +44,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		noDetect  = fs.String("no-detect", "", "disable comma-separated detectors")
 		noGitign  = fs.Bool("no-gitignore", false, "do not respect .gitignore files")
 		hidden    = fs.Bool("hidden", false, "count hidden files and directories")
+		tracked   = fs.Bool("tracked", false, "count only files tracked by git in each path's repository")
 		follow    = fs.Bool("follow-symlinks", false, "follow symbolic links")
 		jobs      = fs.Int("jobs", 0, "number of parallel workers (0 = CPUs)")
 		cfgPath   = fs.String("config", "", "config `file` (default: .aloc.yml, then ~/.config/aloc/config.yml)")
@@ -114,6 +115,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 	useByFile := pickBool(set["by-file"], *byFile, cfg.ByFile)
 	useHidden := pickBool(set["hidden"], *hidden, cfg.Hidden)
+	useTracked := pickBool(set["tracked"], *tracked, cfg.Tracked)
 	useFollow := pickBool(set["follow-symlinks"], *follow, cfg.FollowSymlinks)
 	useGitignore := !*noGitign
 	if !set["no-gitignore"] && cfg.Gitignore != nil {
@@ -219,6 +221,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		Detect:         engine,
 		Gitignore:      useGitignore,
 		Hidden:         useHidden,
+		Tracked:        useTracked,
 		FollowSymlinks: useFollow,
 		Jobs:           useJobs,
 		ByFile:         useByFile,

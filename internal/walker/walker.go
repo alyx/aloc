@@ -32,6 +32,7 @@ type Options struct {
 	Gitignore      bool
 	Hidden         bool
 	FollowSymlinks bool
+	Tracked        bool // count only files tracked by git
 	Jobs           int
 	ByFile         bool
 	Warn           func(format string, args ...any) // may be nil
@@ -83,6 +84,7 @@ func Run(opts Options) (*report.Report, error) {
 	type rootInfo struct {
 		abs, display string
 		isDir        bool
+		tracked      *trackedSet
 	}
 	var roots []rootInfo
 	for _, r := range opts.Roots {
@@ -98,7 +100,17 @@ func Run(opts Options) (*report.Report, error) {
 		if display == "." {
 			display = ""
 		}
-		roots = append(roots, rootInfo{abs: abs, display: display, isDir: fi.IsDir()})
+		ri := rootInfo{abs: abs, display: display, isDir: fi.IsDir()}
+		if opts.Tracked {
+			dir := abs
+			if !ri.isDir {
+				dir = filepath.Dir(abs)
+			}
+			if ri.tracked, err = gitTracked(dir); err != nil {
+				return nil, err
+			}
+		}
+		roots = append(roots, ri)
 	}
 
 	builder := report.NewBuilder(opts.ByFile)
@@ -124,10 +136,14 @@ func Run(opts Options) (*report.Report, error) {
 
 	for _, r := range roots {
 		if r.isDir {
-			w.walkDir(r.abs, r.display, "", &ignore.GitStack{}, nil)
-		} else {
-			w.dispatch(r.abs, displayPath(r.display, ""))
+			w.walkDir(r.abs, r.display, "", &ignore.GitStack{}, nil, r.tracked)
+			continue
 		}
+		if r.tracked != nil && !r.tracked.files[filepath.Base(r.abs)] {
+			w.tracef("skip %s (not tracked by git)", displayPath(r.display, ""))
+			continue
+		}
+		w.dispatch(r.abs, displayPath(r.display, ""))
 	}
 	close(w.jobs)
 	workers.Wait()
@@ -164,7 +180,7 @@ func (w *walker) tracef(format string, args ...any) {
 // walkDir processes one directory. rel is the path relative to the scan
 // root ("" for the root itself); prefix is the root as given on the command
 // line, used only for display.
-func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *detect.Scope) {
+func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *detect.Scope, tr *trackedSet) {
 	// When following symlinks, refuse to enter any directory twice — this
 	// breaks cycles and stops diamond-shaped link layouts double-counting.
 	if w.opts.FollowSymlinks && !w.markVisited(abs) {
@@ -240,6 +256,19 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 			w.tracef("skip %s (excluded by pattern %q)", displayPath(prefix, erel), pat)
 			continue
 		}
+		// The tracked filter runs before smart detection: untracked trees
+		// are pruned outright, while a *committed* vendor dir survives to be
+		// smart-excluded (and attributed) below.
+		if tr != nil {
+			if isDir && !tr.dirs[erel] {
+				w.tracef("skip %s (no git-tracked files)", displayPath(prefix, erel))
+				continue
+			}
+			if !isDir && !tr.files[erel] {
+				w.tracef("skip %s (not tracked by git)", displayPath(prefix, erel))
+				continue
+			}
+		}
 		// Smart detection is checked before gitignore so an ecosystem
 		// directory (node_modules, target, ...) is always attributed to its
 		// detector in the report, even when the project also gitignores it.
@@ -258,7 +287,7 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		}
 
 		if isDir {
-			w.walkDir(childAbs, prefix, erel, gs, scope)
+			w.walkDir(childAbs, prefix, erel, gs, scope, tr)
 			continue
 		}
 		if !e.Type().IsRegular() && e.Type()&fs.ModeSymlink == 0 {

@@ -21,6 +21,7 @@ type Config struct {
 	SmartExclude   *bool    `yaml:"smart_exclude"`
 	Gitignore      *bool    `yaml:"gitignore"`
 	Hidden         *bool    `yaml:"hidden"`
+	Tracked        *bool    `yaml:"tracked"`
 	FollowSymlinks *bool    `yaml:"follow_symlinks"`
 	ByFile         *bool    `yaml:"by_file"`
 	Jobs           *int     `yaml:"jobs"`
