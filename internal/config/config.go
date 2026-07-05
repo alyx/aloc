@@ -22,6 +22,7 @@ type Config struct {
 	Gitignore      *bool    `yaml:"gitignore"`
 	Hidden         *bool    `yaml:"hidden"`
 	Tracked        *bool    `yaml:"tracked"`
+	Dedup          *bool    `yaml:"dedup"`
 	FollowSymlinks *bool    `yaml:"follow_symlinks"`
 	ByFile         *bool    `yaml:"by_file"`
 	Jobs           *int     `yaml:"jobs"`

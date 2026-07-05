@@ -41,6 +41,7 @@ aloc [flags] [path ...]        # default path: .
 | `--no-detect node,rust` | disable individual detectors |
 | `--no-gitignore` | don't respect `.gitignore` files |
 | `--tracked` | count only files tracked by git (see below) |
+| `--dedup` | count only one copy of files with identical content |
 | `--hidden` | count hidden files/directories |
 | `--follow-symlinks` | follow symlinks (loop-safe) |
 | `-j, --jobs <n>` | parallel workers (default: CPU count) |
@@ -145,6 +146,17 @@ are still skipped unless you add `--hidden`, and excludes/includes still
 apply. Git submodule contents are not counted — they belong to their own
 repository's tree.
 
+### `--dedup`
+
+`--dedup` counts only one copy of byte-identical files, so copy-pasted or
+generated duplicates don't inflate the numbers. Files are hashed with
+SHA-256 (hardware-accelerated on amd64/arm64, faster than MD5 in Go, and
+collision-safe) while they are counted, so the extra cost is one hash pass
+over content already in memory. Deduplication is by content alone — it
+crosses languages, and empty files collapse to one. The surviving copy is
+always the lexicographically first path, keeping output deterministic;
+`-vv` traces each casualty as `skip b.go (duplicate of a.go)`.
+
 ## Config file
 
 Searched in order: `--config <file>`, `./.aloc.yml`, `./.aloc.yaml`,
@@ -156,6 +168,7 @@ format: table
 smart_exclude: true
 gitignore: true
 tracked: false
+dedup: false
 hidden: false
 follow_symlinks: false
 by_file: false

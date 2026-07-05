@@ -3,6 +3,8 @@
 package walker
 
 import (
+	"cmp"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/fs"
@@ -10,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -33,6 +36,7 @@ type Options struct {
 	Hidden         bool
 	FollowSymlinks bool
 	Tracked        bool // count only files tracked by git
+	Dedup          bool // count only one copy of identical files
 	Jobs           int
 	ByFile         bool
 	Warn           func(format string, args ...any) // may be nil
@@ -48,6 +52,7 @@ type result struct {
 	language string
 	display  string
 	stats    counter.Stats
+	hash     [sha256.Size]byte // content hash; only filled with Options.Dedup
 }
 
 type walker struct {
@@ -113,13 +118,21 @@ func Run(opts Options) (*report.Report, error) {
 		roots = append(roots, ri)
 	}
 
+	// With Dedup, results are buffered and resolved after the walk: workers
+	// finish in arbitrary order, so picking the surviving copy on the fly
+	// would make output nondeterministic.
 	builder := report.NewBuilder(opts.ByFile)
+	var buffered []result
 	var collect sync.WaitGroup
 	collect.Add(1)
 	go func() {
 		defer collect.Done()
 		for res := range w.results {
-			builder.AddFile(res.language, res.display, res.stats)
+			if opts.Dedup {
+				buffered = append(buffered, res)
+			} else {
+				builder.AddFile(res.language, res.display, res.stats)
+			}
 		}
 	}()
 
@@ -149,6 +162,20 @@ func Run(opts Options) (*report.Report, error) {
 	workers.Wait()
 	close(w.results)
 	collect.Wait()
+
+	if opts.Dedup {
+		// The lexicographically first path of each identical set survives.
+		slices.SortFunc(buffered, func(a, b result) int { return cmp.Compare(a.display, b.display) })
+		firstByHash := map[[sha256.Size]byte]string{}
+		for _, res := range buffered {
+			if first, ok := firstByHash[res.hash]; ok {
+				w.tracef("skip %s (duplicate of %s)", res.display, first)
+				continue
+			}
+			firstByHash[res.hash] = res.display
+			builder.AddFile(res.language, res.display, res.stats)
+		}
+	}
 
 	for _, e := range w.excl {
 		builder.AddExcluded(e.Path, e.Detector)
@@ -374,7 +401,11 @@ func (w *walker) countFile(j job) {
 		w.warnf("skipping binary file %s", j.display)
 		return
 	}
-	w.results <- result{language: l.Name, display: j.display, stats: counter.Count(content, l)}
+	res := result{language: l.Name, display: j.display, stats: counter.Count(content, l)}
+	if w.opts.Dedup {
+		res.hash = sha256.Sum256(content)
+	}
+	w.results <- res
 }
 
 func readPrefix(path string, n int) ([]byte, error) {

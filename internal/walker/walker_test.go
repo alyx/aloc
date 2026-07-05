@@ -285,6 +285,60 @@ func TestWalkTracked(t *testing.T) {
 	}
 }
 
+func TestWalkDedup(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"b/copy.go":  "package dup\nvar x = 1\n",
+		"a/orig.go":  "package dup\nvar x = 1\n", // identical to b/copy.go
+		"unique.go":  "package unique\n",
+		"same.css":   "b { color: red }\n",
+		"twin.scss":  "b { color: red }\n", // identical bytes, different language
+		"empty_a.py": "",
+		"empty_b.py": "", // empty files dedup too
+	}
+	for path, content := range files {
+		abs := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rep := run(t, Options{Roots: []string{root}, Dedup: true, ByFile: true})
+
+	if g := langStats(rep, "Go"); g == nil || g.Files != 2 {
+		t.Errorf("Go = %+v, want 2 files (one copy of the pair, plus unique.go)", g)
+	}
+	// The lexicographically first path survives.
+	if g := langStats(rep, "Go"); g != nil {
+		var paths []string
+		for _, f := range g.Detail {
+			paths = append(paths, filepath.Base(f.Path))
+		}
+		if len(paths) != 2 || paths[0] != "orig.go" {
+			t.Errorf("surviving Go files = %v, want a/orig.go first", paths)
+		}
+	}
+	// Dedup is by content alone, across languages: same.css beats twin.scss.
+	if c := langStats(rep, "CSS"); c == nil || c.Files != 1 {
+		t.Errorf("CSS = %+v, want 1 file", c)
+	}
+	if s := langStats(rep, "SCSS"); s != nil {
+		t.Errorf("SCSS = %+v, want none (identical to same.css)", s)
+	}
+	if py := langStats(rep, "Python"); py == nil || py.Files != 1 {
+		t.Errorf("Python = %+v, want empty files deduped to one", py)
+	}
+
+	// Without the flag, everything is counted.
+	rep2 := run(t, Options{Roots: []string{root}})
+	if rep2.Totals.Files != len(files) {
+		t.Errorf("without dedup: %d files, want %d", rep2.Totals.Files, len(files))
+	}
+}
+
 func TestWalkOverlappingRoots(t *testing.T) {
 	root := fixture(t)
 	rep := run(t, Options{Roots: []string{root, filepath.Join(root, "app")}})
@@ -295,7 +349,7 @@ func TestWalkOverlappingRoots(t *testing.T) {
 
 func TestWalkDeterminism(t *testing.T) {
 	root := fixture(t)
-	opts := Options{Roots: []string{root}, ByFile: true}
+	opts := Options{Roots: []string{root}, ByFile: true, Dedup: true}
 	a, _ := json.Marshal(run(t, opts))
 	for i := 0; i < 5; i++ {
 		b, _ := json.Marshal(run(t, opts))

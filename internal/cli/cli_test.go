@@ -237,6 +237,24 @@ func TestEndToEndTracked(t *testing.T) {
 	}
 }
 
+func TestEndToEndDedup(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"one.go": "package same\n",
+		"two.go": "package same\n",
+	})
+	code, out, errOut := runCLI(t, root, "--no-config", "--dedup", "-f", "json", "-vv", ".")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if r := decode(t, out); r.Totals.Files != 1 {
+		t.Errorf("totals = %+v, want duplicates collapsed to 1", r.Totals)
+	}
+	if !strings.Contains(errOut, "skip two.go (duplicate of one.go)") {
+		t.Errorf("-vv should attribute the duplicate, stderr: %q", errOut)
+	}
+}
+
 func TestExtraVerboseTracesEveryDecision(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{

@@ -45,6 +45,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		noGitign  = fs.Bool("no-gitignore", false, "do not respect .gitignore files")
 		hidden    = fs.Bool("hidden", false, "count hidden files and directories")
 		tracked   = fs.Bool("tracked", false, "count only files tracked by git in each path's repository")
+		dedup     = fs.Bool("dedup", false, "count only one copy of files with identical content")
 		follow    = fs.Bool("follow-symlinks", false, "follow symbolic links")
 		jobs      = fs.Int("jobs", 0, "number of parallel workers (0 = CPUs)")
 		cfgPath   = fs.String("config", "", "config `file` (default: .aloc.yml, then ~/.config/aloc/config.yml)")
@@ -116,6 +117,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	useByFile := pickBool(set["by-file"], *byFile, cfg.ByFile)
 	useHidden := pickBool(set["hidden"], *hidden, cfg.Hidden)
 	useTracked := pickBool(set["tracked"], *tracked, cfg.Tracked)
+	useDedup := pickBool(set["dedup"], *dedup, cfg.Dedup)
 	useFollow := pickBool(set["follow-symlinks"], *follow, cfg.FollowSymlinks)
 	useGitignore := !*noGitign
 	if !set["no-gitignore"] && cfg.Gitignore != nil {
@@ -222,6 +224,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		Gitignore:      useGitignore,
 		Hidden:         useHidden,
 		Tracked:        useTracked,
+		Dedup:          useDedup,
 		FollowSymlinks: useFollow,
 		Jobs:           useJobs,
 		ByFile:         useByFile,
