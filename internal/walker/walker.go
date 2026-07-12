@@ -6,7 +6,6 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -61,6 +60,11 @@ type walker struct {
 	jobs    chan job
 	results chan result
 
+	// Bounded pool for parallel directory traversal; nil means the walk is
+	// serial. See Run for when parallel traversal is safe.
+	walkSem chan struct{}
+	walkWG  sync.WaitGroup
+
 	logMu sync.Mutex // serializes Warn and Trace callbacks
 
 	mu      sync.Mutex
@@ -84,6 +88,16 @@ func Run(opts Options) (*report.Report, error) {
 		results: make(chan result, 4*jobs),
 		seen:    map[string]bool{},
 		visited: map[string]bool{},
+	}
+	// The single-goroutine walk is the pipeline's bottleneck on wide trees:
+	// its ReadDir latency inflates under concurrent worker I/O and starves
+	// the workers. A bounded pool of walk goroutines fixes that. The final
+	// report is unaffected (Build sorts languages, per-file detail, and
+	// exclusions; dedup buffers then sorts), but Warn/Trace arrival order
+	// and the symlink-visit outcome would become nondeterministic — so the
+	// walk stays serial whenever any of those is observable.
+	if opts.Trace == nil && opts.Warn == nil && !opts.FollowSymlinks && jobs > 1 {
+		w.walkSem = make(chan struct{}, min(8, jobs))
 	}
 
 	// Validate roots up front so a bad argument is a hard error, not a warning.
@@ -142,8 +156,15 @@ func Run(opts Options) (*report.Report, error) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			// Per-worker scratch buffer, reused across files: content never
+			// escapes countFile. Shrunk after an outsized file so one huge
+			// blob does not pin memory for the rest of the run.
+			buf := make([]byte, initialBufSize)
 			for j := range w.jobs {
-				w.countFile(j)
+				buf = w.countFile(j, buf)
+				if len(buf) > maxKeepBufSize {
+					buf = make([]byte, initialBufSize)
+				}
 			}
 		}()
 	}
@@ -151,6 +172,10 @@ func Run(opts Options) (*report.Report, error) {
 	for _, r := range roots {
 		if r.isDir {
 			w.walkDir(r.abs, r.display, "", &ignore.GitStack{}, nil, r.tracked)
+			// Drain this root's walk goroutines before starting the next
+			// root: overlapping roots (aloc . ./src) must resolve their
+			// duplicates in root order, exactly as the serial walk does.
+			w.walkWG.Wait()
 			continue
 		}
 		if r.tracked != nil && !r.tracked.files[filepath.Base(r.abs)] {
@@ -315,6 +340,22 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		}
 
 		if isDir {
+			// Hand the subtree to a walk goroutine when the pool has room;
+			// otherwise recurse inline. gs and scope are immutable once
+			// built, so sharing them across goroutines is safe.
+			if w.walkSem != nil {
+				select {
+				case w.walkSem <- struct{}{}:
+					w.walkWG.Add(1)
+					go func(abs, rel string) {
+						defer w.walkWG.Done()
+						defer func() { <-w.walkSem }()
+						w.walkDir(abs, prefix, rel, gs, scope, tr)
+					}(childAbs, erel)
+					continue
+				default:
+				}
+			}
 			w.walkDir(childAbs, prefix, erel, gs, scope, tr)
 			continue
 		}
@@ -372,35 +413,73 @@ func (w *walker) dispatch(abs, display string) {
 	w.jobs <- job{abs: abs, display: display}
 }
 
-func (w *walker) countFile(j job) {
+const (
+	// initialBufSize is each worker's scratch buffer; most source files fit.
+	initialBufSize = 128 * 1024
+	// maxKeepBufSize caps what a worker keeps between files after growing
+	// for an unusually large one.
+	maxKeepBufSize = 4 << 20
+)
+
+// countFile reads and counts one file using a single descriptor: the shebang
+// sniff (when needed) and the content read share it, replacing the previous
+// open/read/close + open/fstat/read/read/close sequence. buf is the worker's
+// scratch buffer; the (possibly grown) buffer is returned for reuse.
+func (w *walker) countFile(j job, buf []byte) []byte {
 	l := w.opts.Registry.ByPath(j.abs)
+	var f rawFile
+	opened := false
+	off := 0
 	if l == nil {
-		// Unknown by name: sniff a small prefix for a shebang before
-		// committing to reading the whole file.
-		head, err := readPrefix(j.abs, 256)
+		// Unknown by name: sniff a small prefix for a shebang on the same
+		// descriptor the content read will continue from.
+		var err error
+		f, err = openRaw(j.abs)
 		if err != nil {
 			w.warnf("cannot read %s: %v", j.display, err)
-			return
+			return buf
 		}
-		l = w.opts.Registry.ByShebang(head)
+		opened = true
+		n, err := f.read(buf[:256])
+		if err != nil {
+			f.close()
+			w.warnf("cannot read %s: %v", j.display, err)
+			return buf
+		}
+		l = w.opts.Registry.ByShebang(buf[:n])
 		if l == nil {
+			f.close()
 			w.tracef("skip %s (unknown language)", j.display)
-			return
+			return buf
 		}
+		off = n
 	}
 	if len(w.opts.Languages) > 0 && !w.opts.Languages[strings.ToLower(l.Name)] {
+		if opened {
+			f.close()
+		}
 		w.tracef("skip %s (language %s not selected by --lang)", j.display, l.Name)
-		return
+		return buf
 	}
 
-	content, err := os.ReadFile(j.abs)
+	if !opened {
+		var err error
+		f, err = openRaw(j.abs)
+		if err != nil {
+			w.warnf("cannot read %s: %v", j.display, err)
+			return buf
+		}
+	}
+	total, buf, err := readFull(f, buf, off)
+	f.close()
 	if err != nil {
 		w.warnf("cannot read %s: %v", j.display, err)
-		return
+		return buf
 	}
+	content := buf[:total]
 	if counter.IsBinary(content) {
 		w.warnf("skipping binary file %s", j.display)
-		return
+		return buf
 	}
 	if w.opts.TraceFiles {
 		w.tracef("count %s (%s)", j.display, l.Name)
@@ -410,20 +489,32 @@ func (w *walker) countFile(j job) {
 		res.hash = sha256.Sum256(content)
 	}
 	w.results <- res
+	return buf
 }
 
-func readPrefix(path string, n int) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+// readFull reads the rest of the file into buf starting at off, growing the
+// buffer as needed, until a 0-byte read confirms EOF. The explicit EOF read
+// keeps short reads (FUSE, network filesystems) correct at the cost of one
+// extra read syscall per file.
+func readFull(f rawFile, buf []byte, off int) (int, []byte, error) {
+	total := off
+	for {
+		if total == len(buf) {
+			nb := make([]byte, 2*len(buf))
+			copy(nb, buf[:total])
+			buf = nb
+		}
+		m, err := f.read(buf[total:])
+		if m > 0 {
+			total += m
+		}
+		if err != nil {
+			return total, buf, err
+		}
+		if m == 0 {
+			return total, buf, nil // EOF
+		}
 	}
-	defer f.Close()
-	buf := make([]byte, n)
-	m, err := f.Read(buf)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	return buf[:m], nil
 }
 
 func isVCSDir(name string) bool {
