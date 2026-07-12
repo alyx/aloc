@@ -43,9 +43,15 @@ type Options struct {
 }
 
 type job struct {
-	abs     string
-	display string // path shown in output and warnings
+	abs    string
+	prefix string // root as given on the command line, for display
+	erel   string // path relative to the scan root, for display
 }
+
+// display builds the path shown in output and warnings. Callers build it
+// only when something will read it: per-file detail, dedup ordering,
+// warnings, and traces.
+func (j job) display() string { return displayPath(j.prefix, j.erel) }
 
 type result struct {
 	language string
@@ -185,7 +191,7 @@ func Run(opts Options) (*report.Report, error) {
 			w.tracef("skip %s (not tracked by git)", displayPath(r.display, ""))
 			continue
 		}
-		w.dispatch(r.abs, displayPath(r.display, ""))
+		w.dispatch(r.abs, r.display, "")
 	}
 	close(w.jobs)
 	workers.Wait()
@@ -423,7 +429,7 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 			}
 			continue
 		}
-		w.dispatch(childAbs, displayPath(prefix, erel))
+		w.dispatch(childAbs, prefix, erel)
 	}
 }
 
@@ -449,7 +455,7 @@ func (w *walker) recordExcluded(path, detector string) {
 	w.mu.Unlock()
 }
 
-func (w *walker) dispatch(abs, display string) {
+func (w *walker) dispatch(abs, prefix, erel string) {
 	// Overlapping roots (aloc . ./src) must not double-count. With a single
 	// root and no symlink following every path is reached exactly once, so
 	// the map and its lock are skipped.
@@ -459,7 +465,9 @@ func (w *walker) dispatch(abs, display string) {
 		w.seen[abs] = true
 		w.mu.Unlock()
 		if dup {
-			w.tracef("skip %s (already counted via another root)", display)
+			if w.trace {
+				w.tracef("skip %s (already counted via another root)", displayPath(prefix, erel))
+			}
 			return
 		}
 	}
@@ -467,11 +475,13 @@ func (w *walker) dispatch(abs, display string) {
 	if len(w.opts.Extensions) > 0 {
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(abs)), ".")
 		if !w.opts.Extensions[ext] {
-			w.tracef("skip %s (extension not selected by --ext)", display)
+			if w.trace {
+				w.tracef("skip %s (extension not selected by --ext)", displayPath(prefix, erel))
+			}
 			return
 		}
 	}
-	w.jobs <- job{abs: abs, display: display}
+	w.jobs <- job{abs: abs, prefix: prefix, erel: erel}
 }
 
 const (
@@ -497,20 +507,22 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		var err error
 		f, err = openRaw(j.abs)
 		if err != nil {
-			w.warnf("cannot read %s: %v", j.display, err)
+			w.warnf("cannot read %s: %v", j.display(), err)
 			return buf
 		}
 		opened = true
 		n, err := f.read(buf[:256])
 		if err != nil {
 			f.close()
-			w.warnf("cannot read %s: %v", j.display, err)
+			w.warnf("cannot read %s: %v", j.display(), err)
 			return buf
 		}
 		l = w.opts.Registry.ByShebang(buf[:n])
 		if l == nil {
 			f.close()
-			w.tracef("skip %s (unknown language)", j.display)
+			if w.trace {
+				w.tracef("skip %s (unknown language)", j.display())
+			}
 			return buf
 		}
 		off = n
@@ -519,7 +531,9 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		if opened {
 			f.close()
 		}
-		w.tracef("skip %s (language %s not selected by --lang)", j.display, l.Name)
+		if w.trace {
+			w.tracef("skip %s (language %s not selected by --lang)", j.display(), l.Name)
+		}
 		return buf
 	}
 
@@ -527,25 +541,30 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		var err error
 		f, err = openRaw(j.abs)
 		if err != nil {
-			w.warnf("cannot read %s: %v", j.display, err)
+			w.warnf("cannot read %s: %v", j.display(), err)
 			return buf
 		}
 	}
 	total, buf, err := readFull(f, buf, off)
 	f.close()
 	if err != nil {
-		w.warnf("cannot read %s: %v", j.display, err)
+		w.warnf("cannot read %s: %v", j.display(), err)
 		return buf
 	}
 	content := buf[:total]
 	if counter.IsBinary(content) {
-		w.warnf("skipping binary file %s", j.display)
+		w.warnf("skipping binary file %s", j.display())
 		return buf
 	}
 	if w.opts.TraceFiles {
-		w.tracef("count %s (%s)", j.display, l.Name)
+		w.tracef("count %s (%s)", j.display(), l.Name)
 	}
-	res := result{language: l.Name, display: j.display, stats: counter.Count(content, l)}
+	res := result{language: l.Name, stats: counter.Count(content, l)}
+	if w.opts.ByFile || w.opts.Dedup {
+		// display is consumed only by per-file detail and dedup's
+		// deterministic first-path pick; aggregate runs never read it.
+		res.display = j.display()
+	}
 	if w.opts.Dedup {
 		res.hash = sha256.Sum256(content)
 	}
