@@ -54,9 +54,24 @@ type compiled struct {
 	// block comment opener, quote opener) or is ' '/'\t'. Bytes with
 	// gate[b]==false can never change scanner state and are plain code.
 	gate [256]bool
+	// fclass classifies each byte for the fused whole-buffer scan with a
+	// single table load. clPlain bytes can never change scanner state,
+	// end a line, or affect the blank check.
+	fclass [256]byte
 	// blockClosers[i] is BlockComments[i][1] as []byte for bytes.Index.
 	blockClosers [][]byte
 }
+
+// Byte classes for the fused scan. clPlain must be zero: it is the table's
+// default and the run loop compares against it.
+const (
+	clPlain byte = iota // plain code byte, extend the run
+	clWS                // ' ' or '\t'
+	clNL                // '\n': finalize the line
+	clCR                // '\r': stripped before '\n', plain otherwise
+	clMaybe             // '\v', '\f', non-ASCII: TrimSpace may strip these
+	clMark              // possible delimiter first byte
+)
 
 var compiledCache sync.Map // *lang.Language -> *compiled
 
@@ -85,6 +100,20 @@ func compile(l *lang.Language) *compiled {
 	for _, p := range l.Quotes {
 		mark(p[0])
 	}
+	for b := 0; b < 256; b++ {
+		switch {
+		case c.gate[b] && b != ' ' && b != '\t':
+			c.fclass[b] = clMark
+		case b == ' ' || b == '\t':
+			c.fclass[b] = clWS
+		case b == '\n':
+			c.fclass[b] = clNL
+		case b == '\r':
+			c.fclass[b] = clCR
+		case b == '\v' || b == '\f' || b >= 0x80:
+			c.fclass[b] = clMaybe
+		}
+	}
 	return c
 }
 
@@ -98,6 +127,15 @@ func compiledFor(l *lang.Language) *compiled {
 
 // Count classifies every line of content according to l. It never fails:
 // malformed input degrades to code lines.
+//
+// The scan is a single fused pass over the whole buffer: line boundaries are
+// events inside the state machine rather than an outer split loop, so plain
+// code skips through the gate table without per-line call overhead, and
+// multi-line comments and strings jump straight to their closer with one
+// bytes.Index over the remaining buffer instead of one failed search per
+// line. Per-line semantics (blank via bytes.TrimSpace, one stripped trailing
+// \r, line-bounded single-line strings) are preserved exactly; oldCount in
+// old_impl_test.go is the differential oracle.
 func Count(content []byte, l *lang.Language) Stats {
 	content = bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM
 
@@ -105,28 +143,247 @@ func Count(content []byte, l *lang.Language) Stats {
 	var st state
 	var s Stats
 	s.Files = 1
-	for len(content) > 0 {
-		var line []byte
-		if i := bytes.IndexByte(content, '\n'); i >= 0 {
-			line = content[:i]
-			content = content[i+1:]
-		} else {
-			line = content
-			content = nil
-		}
-		if n := len(line); n > 0 && line[n-1] == '\r' {
-			line = line[:n-1]
+
+	n := len(content)
+	i, lineStart := 0, 0
+	// eol caches the position of the next '\n' at or after i (n when none);
+	// valid while eol >= i. Lines with several strings or comment markers
+	// reuse it instead of re-scanning to the line end.
+	eol := -1
+	// Per-line flags. sawText: a byte TrimSpace can never strip was seen, so
+	// the line cannot be blank. maybeWS: only bytes TrimSpace *might* strip
+	// were seen ('\v', '\f', non-ASCII, interior '\r'); blankness falls back
+	// to TrimSpace on the whole line, exactly like the per-line scanner.
+	sawText, maybeWS, hasCode, hasComment := false, false, false, false
+
+scan:
+	for i < n {
+		// Inside a multi-line string: everything is code until the closer.
+		// The closer is located once over the remaining buffer (escape
+		// parity cannot cross a newline, so this matches the per-line
+		// search), then the enclosed line boundaries are replayed.
+		if st.quotePair != 0 {
+			hasCode, maybeWS = true, true
+			var close string
+			if st.quoteRaw {
+				close = l.RawQuotes[st.quotePair-1][1]
+			} else {
+				close = l.MultiQuotes[st.quotePair-1][1]
+			}
+			j := indexDelim(content[i:], close, !st.quoteRaw)
+			stop := n
+			if j >= 0 {
+				stop = i + j
+			}
+			for {
+				k := bytes.IndexByte(content[i:], '\n')
+				if j >= 0 && (k < 0 || i+k > stop) {
+					i = stop + len(close)
+					st.quotePair = 0
+					break
+				}
+				if k < 0 {
+					i = n
+					break
+				}
+				s.endLine(content[lineStart:i+k], sawText, maybeWS, hasCode, hasComment)
+				i += k + 1
+				lineStart = i
+				sawText, maybeWS, hasCode, hasComment = false, true, true, false
+			}
+			continue
 		}
 
-		s.Lines++
-		switch classify(line, l, cp, &st) {
-		case kindBlank:
-			s.Blank++
-		case kindComment:
-			s.Comment++
-		default:
-			s.Code++
+		// Inside a block comment: look for the closer (and nested openers).
+		if st.blockPair != 0 {
+			hasComment, maybeWS = true, true
+			pair := l.BlockComments[st.blockPair-1]
+			if !l.Nested {
+				// Depth is always 1: jump straight to the closer, wherever
+				// it is, and replay the line boundaries in between.
+				j := bytes.Index(content[i:], cp.blockClosers[st.blockPair-1])
+				stop := n
+				if j >= 0 {
+					stop = i + j
+				}
+				for {
+					k := bytes.IndexByte(content[i:], '\n')
+					if j >= 0 && (k < 0 || i+k > stop) {
+						i = stop + len(pair[1])
+						st.blockDepth = 0
+						st.blockPair = 0
+						break
+					}
+					if k < 0 {
+						i = n
+						break
+					}
+					s.endLine(content[lineStart:i+k], sawText, maybeWS, hasCode, hasComment)
+					i += k + 1
+					lineStart = i
+					sawText, maybeWS, hasCode, hasComment = false, true, false, true
+				}
+				continue
+			}
+			// Nested: openers and closers must be counted byte by byte;
+			// markers never contain \n or \r, so unbounded prefix matches
+			// cannot cross a line boundary.
+			o0, c0 := pair[0][0], pair[1][0]
+			for i < n {
+				b := content[i]
+				if b == '\n' {
+					s.endLine(content[lineStart:i], sawText, maybeWS, hasCode, hasComment)
+					i++
+					lineStart = i
+					sawText, maybeWS, hasCode, hasComment = false, true, false, true
+					continue
+				}
+				if b != o0 && b != c0 {
+					i++
+					continue
+				}
+				if hasPrefix(content[i:], pair[0]) {
+					st.blockDepth++
+					i += len(pair[0])
+					continue
+				}
+				if hasPrefix(content[i:], pair[1]) {
+					i += len(pair[1])
+					st.blockDepth--
+					if st.blockDepth == 0 {
+						st.blockPair = 0
+						break
+					}
+					continue
+				}
+				i++
+			}
+			continue
 		}
+
+		// Normal state: scan in a tight loop that re-checks the multi-line
+		// states only when a delimiter actually opens one (continue scan).
+		for i < n {
+			switch cp.fclass[content[i]] {
+			case clPlain:
+				// Fast path: bytes that cannot start any delimiter, end a
+				// line, or confuse the blank check are plain code. Skip the
+				// whole run with one table load per byte.
+				sawText, hasCode = true, true
+				for i++; i < n && cp.fclass[content[i]] == clPlain; i++ {
+				}
+
+			case clWS:
+				for i++; i < n && cp.fclass[content[i]] == clWS; i++ {
+				}
+
+			case clNL:
+				// Finalize the line inline; endLine stays for the other exits.
+				s.Lines++
+				switch {
+				case !sawText && (!maybeWS || wsOnly(content[lineStart:i])):
+					s.Blank++
+				case hasCode || !hasComment:
+					s.Code++
+				default:
+					s.Comment++
+				}
+				i++
+				lineStart = i
+				sawText, maybeWS, hasCode, hasComment = false, false, false, false
+
+			case clCR:
+				if i+1 == n || content[i+1] == '\n' {
+					// The one trailing \r the per-line scanner strips.
+					i++
+				} else {
+					// Interior \r: plain code byte, but TrimSpace-strippable.
+					hasCode, maybeWS = true, true
+					i++
+				}
+
+			case clMaybe:
+				// '\v', '\f', or non-ASCII: plain code bytes whose whitespace-
+				// ness only TrimSpace can decide at line end.
+				hasCode, maybeWS = true, true
+				for i++; i < n && cp.fclass[content[i]] == clMaybe; i++ {
+				}
+
+			default: // clMark
+				// Block comment opener — checked before line comments so that
+				// openers sharing a prefix with them (Lua's --[[ vs --, Julia's
+				// #= vs #) are not swallowed by the shorter marker.
+				if p := prefixPair(content[i:], l.BlockComments); p >= 0 {
+					sawText, hasComment = true, true
+					st.blockPair = p + 1
+					st.blockDepth = 1
+					i += len(l.BlockComments[p][0])
+					continue scan
+				}
+
+				// Line comment: the rest of the line is comment; jump to it.
+				if lineComments(content[i:], l) {
+					sawText, hasComment = true, true
+					if eol < i {
+						if k := bytes.IndexByte(content[i:], '\n'); k >= 0 {
+							eol = i + k
+						} else {
+							eol = n
+						}
+					}
+					i = eol
+					continue
+				}
+
+				// Multi-line string openers (checked before single-line quotes
+				// so `"""` wins over `"`).
+				if p := prefixPair(content[i:], l.MultiQuotes); p >= 0 {
+					sawText, hasCode = true, true
+					st.quotePair = p + 1
+					st.quoteRaw = false
+					i += len(l.MultiQuotes[p][0])
+					continue scan
+				}
+				if p := prefixPair(content[i:], l.RawQuotes); p >= 0 {
+					sawText, hasCode = true, true
+					st.quotePair = p + 1
+					st.quoteRaw = true
+					i += len(l.RawQuotes[p][0])
+					continue scan
+				}
+
+				// Single-line string: skip to the closer so comment markers
+				// inside strings are not misread. The search is bounded at the
+				// line end: an unterminated string ends at EOL.
+				if p := prefixPair(content[i:], l.Quotes); p >= 0 {
+					sawText, hasCode = true, true
+					open, close := l.Quotes[p][0], l.Quotes[p][1]
+					i += len(open)
+					if eol < i {
+						if k := bytes.IndexByte(content[i:], '\n'); k >= 0 {
+							eol = i + k
+						} else {
+							eol = n
+						}
+					}
+					j := indexDelim(content[i:eol], close, true)
+					if j < 0 {
+						i = eol
+						continue
+					}
+					i += j + len(close)
+					continue
+				}
+
+				// A delimiter-looking byte that matched nothing (`/` as
+				// division).
+				sawText, hasCode = true, true
+				i++
+			}
+		}
+	}
+	if lineStart < n {
+		s.endLine(content[lineStart:n], sawText, maybeWS, hasCode, hasComment)
 	}
 	return s
 }
@@ -139,149 +396,33 @@ const (
 	kindBlank
 )
 
-func classify(line []byte, l *lang.Language, cp *compiled, st *state) lineKind {
-	if len(bytes.TrimSpace(line)) == 0 {
-		return kindBlank
+// endLine finalizes one line. seg is the raw line without its terminator
+// (a trailing \r may remain; TrimSpace strips it anyway).
+func (s *Stats) endLine(seg []byte, sawText, maybeWS, hasCode, hasComment bool) {
+	s.Lines++
+	if !sawText && (!maybeWS || wsOnly(seg)) {
+		s.Blank++
+	} else if hasCode || !hasComment {
+		s.Code++
+	} else {
+		s.Comment++
 	}
+}
 
-	hasCode := false
-	hasComment := false
-	i := 0
-scan:
-	for i < len(line) {
-		// Inside a multi-line string: everything is code until the closer.
-		if st.quotePair != 0 {
-			hasCode = true
-			var close string
-			if st.quoteRaw {
-				close = l.RawQuotes[st.quotePair-1][1]
-			} else {
-				close = l.MultiQuotes[st.quotePair-1][1]
-			}
-			j := indexDelim(line[i:], close, !st.quoteRaw)
-			if j < 0 {
-				break scan
-			}
-			i += j + len(close)
-			st.quotePair = 0
-			continue
-		}
+// wsOnly reports whether seg is entirely whitespace under the same rules as
+// the per-line scanner's blank check.
+func wsOnly(seg []byte) bool {
+	return len(bytes.TrimSpace(seg)) == 0
+}
 
-		// Inside a block comment: look for the closer (and nested openers).
-		if st.blockPair != 0 {
-			hasComment = true
-			pair := l.BlockComments[st.blockPair-1]
-			if !l.Nested {
-				// Depth is always 1: jump straight to the closer.
-				j := bytes.Index(line[i:], cp.blockClosers[st.blockPair-1])
-				if j < 0 {
-					break scan
-				}
-				i += j + len(pair[1])
-				st.blockDepth = 0
-				st.blockPair = 0
-				continue
-			}
-			o0, c0 := pair[0][0], pair[1][0]
-			for i < len(line) {
-				if b := line[i]; b != o0 && b != c0 {
-					i++
-					continue
-				}
-				if hasPrefix(line[i:], pair[0]) {
-					st.blockDepth++
-					i += len(pair[0])
-					continue
-				}
-				if hasPrefix(line[i:], pair[1]) {
-					i += len(pair[1])
-					st.blockDepth--
-					if st.blockDepth == 0 {
-						st.blockPair = 0
-						continue scan
-					}
-					continue
-				}
-				i++
-			}
-			break scan
+// lineComments reports whether s starts with any of l's line comments.
+func lineComments(s []byte, l *lang.Language) bool {
+	for _, lc := range l.LineComments {
+		if hasPrefix(s, lc) {
+			return true
 		}
-
-		c := line[i]
-		// Fast path: bytes that cannot start any delimiter are plain code.
-		// Skip the whole run with one table load per byte.
-		if !cp.gate[c] {
-			hasCode = true
-			for i++; i < len(line) && !cp.gate[line[i]]; i++ {
-			}
-			continue
-		}
-		if c == ' ' || c == '\t' {
-			i++
-			continue
-		}
-
-		// Block comment opener — checked before line comments so that
-		// openers sharing a prefix with them (Lua's --[[ vs --, Julia's #=
-		// vs #) are not swallowed by the shorter marker.
-		if p := prefixPair(line[i:], l.BlockComments); p >= 0 {
-			hasComment = true
-			st.blockPair = p + 1
-			st.blockDepth = 1
-			i += len(l.BlockComments[p][0])
-			continue
-		}
-
-		// Line comment: rest of the line is comment.
-		for _, lc := range l.LineComments {
-			if hasPrefix(line[i:], lc) {
-				hasComment = true
-				break scan
-			}
-		}
-
-		// Multi-line string openers (checked before single-line quotes so
-		// `"""` wins over `"`).
-		if p := prefixPair(line[i:], l.MultiQuotes); p >= 0 {
-			hasCode = true
-			st.quotePair = p + 1
-			st.quoteRaw = false
-			i += len(l.MultiQuotes[p][0])
-			continue
-		}
-		if p := prefixPair(line[i:], l.RawQuotes); p >= 0 {
-			hasCode = true
-			st.quotePair = p + 1
-			st.quoteRaw = true
-			i += len(l.RawQuotes[p][0])
-			continue
-		}
-
-		// Single-line string: skip to the closer so comment markers inside
-		// strings are not misread. An unterminated string ends at EOL.
-		if p := prefixPair(line[i:], l.Quotes); p >= 0 {
-			hasCode = true
-			open, close := l.Quotes[p][0], l.Quotes[p][1]
-			i += len(open)
-			j := indexDelim(line[i:], close, true)
-			if j < 0 {
-				break scan
-			}
-			i += j + len(close)
-			continue
-		}
-
-		hasCode = true
-		i++
 	}
-
-	if hasCode {
-		return kindCode
-	}
-	if hasComment {
-		return kindComment
-	}
-	return kindCode
+	return false
 }
 
 // prefixPair returns the index of the first pair whose opener is a prefix of

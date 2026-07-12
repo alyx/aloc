@@ -78,6 +78,18 @@ func TestDifferentialEdgeCases(t *testing.T) {
 		"\"\\\\\" + \"\\\\\\\"\" // escapes\n",
 		"'''\npython doc\n'''\n",
 		"x = \"\"\"a\"\"\" + \"\"\"b\nc\"\"\"\n",
+		"\v\n\f\n \v \n",                      // TrimSpace-only blanks
+		"\xc2\xa0\n",                          // NBSP-only line is blank
+		"\xc2\xa0// not reached\n",            // NBSP then marker
+		"日本語 = \"テスト\" // コメント\n",   // multi-byte text
+		"\rx\n\r// c\n\r\r\n",                 // interior \r torture
+		"a\r\r\n\r\n",                         // \r runs against CRLF
+		"/* a\n\n \x0b \n*/ x\n",              // blank lines inside block comment
+		"m = \"\"\"\n\n  \n\xc2\xa0\nend\"\"\"\n", // blanks inside multi-line string
+		"s = \"x\\\r\n\" y\n",                 // backslash before CRLF in string
+		"no trailing newline",
+		"ends with cr\r",
+		"\"\"\"\r\nx\r\n\"\"\"\r\n",           // CRLF multi-line string
 	}
 	reg := lang.NewRegistry()
 	for _, name := range reg.Names() {
@@ -94,8 +106,11 @@ func TestDifferentialEdgeCases(t *testing.T) {
 // to both implementations for every builtin language. This is the guard
 // against fast-path divergence on inputs no curated list anticipates.
 func TestDifferentialRandom(t *testing.T) {
-	// Alphabet skewed heavily toward delimiter and escape bytes.
-	alphabet := `"'` + "`" + `\/*#-=<>![]{}() ` + "\t\r\n" + `abc123`
+	// Alphabet skewed heavily toward delimiter and escape bytes, plus the
+	// whitespace-ambiguous bytes the fused scan special-cases: \v, \f,
+	// non-ASCII (NBSP as \xc2\xa0, and a lone continuation byte), and \r in
+	// positions other than before \n.
+	alphabet := `"'` + "`" + `\/*#-=<>![]{}() ` + "\t\r\n" + `abc123` + "\v\f\xc2\xa0\x80"
 	reg := lang.NewRegistry()
 	rng := rand.New(rand.NewSource(1))
 	for _, name := range reg.Names() {
