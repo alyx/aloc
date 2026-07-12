@@ -33,7 +33,8 @@ func gitTracked(dir string) (*trackedSet, error) {
 			continue
 		}
 		ts.files[f] = true
-		for d := path.Dir(f); d != "."; d = path.Dir(d) {
+		// Ancestors of an already-recorded directory are recorded too.
+		for d := path.Dir(f); d != "." && !ts.dirs[d]; d = path.Dir(d) {
 			ts.dirs[d] = true
 		}
 	}

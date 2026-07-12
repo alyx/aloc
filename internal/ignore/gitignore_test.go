@@ -81,6 +81,39 @@ func TestGitStackScoping(t *testing.T) {
 	}
 }
 
+func TestGitStackParts(t *testing.T) {
+	// The walker feeds pre-split segments; both entry points must agree
+	// with the string API.
+	s := (&GitStack{}).
+		Push("", ParseGitIgnore([]byte("*.log\n!keep.log\n"))).
+		Push("sub", ParseGitIgnore([]byte("!debug.log\n")))
+	for _, tt := range []struct {
+		rel  string
+		want bool
+	}{
+		{"app.log", true},
+		{"keep.log", false},
+		{"sub/app.log", true},
+		{"sub/debug.log", false},
+		{"subx/debug.log", true}, // "subx" is not inside "sub"
+		{"sub", false},
+	} {
+		parts := splitPath(tt.rel)
+		if got := s.IgnoredParts(parts, false); got != tt.want {
+			t.Errorf("IgnoredParts(%q) = %v, want %v", tt.rel, got, tt.want)
+		}
+		if got, _ := s.IgnoredByParts(parts, false); got != tt.want {
+			t.Errorf("IgnoredByParts(%q) = %v, want %v", tt.rel, got, tt.want)
+		}
+		if got := s.Ignored(tt.rel, false); got != tt.want {
+			t.Errorf("Ignored(%q) = %v, want %v", tt.rel, got, tt.want)
+		}
+	}
+	if !(&GitStack{}).Empty() || !(*GitStack)(nil).Empty() || s.Empty() {
+		t.Error("Empty() wrong")
+	}
+}
+
 func TestGitStackIgnoredByAttribution(t *testing.T) {
 	s := (&GitStack{}).
 		Push("", ParseGitIgnore([]byte("*.log\n"))).

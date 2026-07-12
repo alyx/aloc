@@ -95,6 +95,47 @@ func TestSelfMarkers(t *testing.T) {
 	}
 }
 
+func TestMarkerIndexSemantics(t *testing.T) {
+	// The engine indexes literal markers separately from globs; exact names,
+	// suffix globs, and general globs must all still fire, and detector
+	// order must decide attribution when markers overlap.
+	custom := []Detector{
+		{Name: "first", Markers: []string{"dup.marker"}, ExcludeDirs: []string{"out"}},
+		{Name: "second", Markers: []string{"dup.marker", "gen-?.cfg"}, ExcludeDirs: []string{"out", "cache"}},
+	}
+	e, err := NewEngine(custom, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := e.Extend(nil, "", []string{"dup.marker"})
+	if got := scope.ExcludedBy("out"); got != "first" {
+		t.Errorf("overlapping rule: got %q, want first (detector order)", got)
+	}
+	if got := scope.ExcludedBy("cache"); got != "second" {
+		t.Errorf("cache: got %q, want second", got)
+	}
+	scope2 := e.Extend(nil, "", []string{"gen-a.cfg"})
+	if got := scope2.ExcludedBy("cache"); got != "second" {
+		t.Errorf("'?' glob marker: got %q, want second", got)
+	}
+
+	// A suffix glob matches an empty stem, exactly like path.Match.
+	tf := engine(t).Extend(nil, "", []string{".tf"})
+	if got := tf.ExcludedBy("x/.terraform"); got != "terraform" {
+		t.Errorf("bare .tf: got %q, want terraform", got)
+	}
+
+	// A marker hit whose detector has no ExcludeDirs must not fork the scope.
+	e2, err := NewEngine([]Detector{{Name: "bare", Markers: []string{"bare.marker"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := e2.Extend(nil, "", []string{"Cargo.toml"})
+	if child := e2.Extend(parent, "sub", []string{"bare.marker"}); child != parent {
+		t.Error("rule-less marker hit should return the parent scope")
+	}
+}
+
 func TestDisableAndCustom(t *testing.T) {
 	e := engine(t, "node")
 	scope := e.Extend(nil, "", []string{"package.json"})
