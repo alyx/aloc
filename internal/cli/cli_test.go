@@ -25,10 +25,26 @@ func writeTree(t *testing.T, root string, files map[string]string) {
 	}
 }
 
+func testChdir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+}
+
 // runCLI executes Main from inside dir and returns (exit, stdout, stderr).
 func runCLI(t *testing.T, dir string, args ...string) (int, string, string) {
 	t.Helper()
-	t.Chdir(dir)
+	testChdir(t, dir)
 	var out, errBuf bytes.Buffer
 	code := Main(args, &out, &errBuf)
 	return code, out.String(), errBuf.String()
@@ -189,6 +205,24 @@ func TestListingsAndVersion(t *testing.T) {
 	}
 	if code, out, _ := runCLI(t, root, "--version"); code != 0 || !strings.Contains(out, "aloc") {
 		t.Errorf("--version: code %d, out %q", code, out)
+	}
+}
+
+func TestResolveVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name, stamped, module, want string
+	}{
+		{"ldflags wins", "1.2.0", "v1.1.0", "1.2.0"},
+		{"trim stamped v", "v1.2.0", "", "1.2.0"},
+		{"go install module", "dev", "v1.2.0", "1.2.0"},
+		{"local build", "dev", "(devel)", "dev"},
+		{"missing metadata", "", "", "dev"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveVersion(tt.stamped, tt.module); got != tt.want {
+				t.Errorf("resolveVersion(%q, %q) = %q, want %q", tt.stamped, tt.module, got, tt.want)
+			}
+		})
 	}
 }
 

@@ -18,6 +18,18 @@ Total                           15         262         186        2139
 
 ## Install
 
+With Go 1.22 or newer:
+
+```sh
+go install github.com/alyx/aloc/cmd/aloc@latest
+```
+
+Prebuilt archives for Linux, macOS, and Windows are available from
+[GitHub Releases](https://github.com/alyx/aloc/releases). Each release includes
+SHA-256 checksums.
+
+To build a checkout instead:
+
 ```sh
 go build -o aloc ./cmd/aloc
 ```
@@ -48,9 +60,21 @@ aloc [flags] [path ...]        # default path: .
 | `-j, --jobs <n>` | parallel workers (default: CPU count) |
 | `--config <file>` / `--no-config` | config file control |
 | `--list-languages` / `--list-detectors` | show what's built in |
+| `--version` | print the aloc and Go versions |
 | `-v, --verbose` | warnings + applied smart exclusions on stderr |
 | `-vv` | explain **every** skip decision: gitignore rule (with source file), exclude pattern, hidden, symlink, filters, unknown language (implies `-v`) |
 | `-vvv` | also list every counted file and its detected language, after all filters (implies `-vv`) |
+
+## Language support
+
+`aloc` recognizes 151 languages and standalone source formats, including the
+major application, systems, scripting, shader/GPU, HDL, infrastructure, and
+documentation ecosystems. Run `aloc --list-languages` for the authoritative
+list in your installed version.
+
+Definitions can be added or overridden in the configuration file without
+recompiling. Ambiguous extensions retain a stable built-in owner rather than
+changing interpretation when another language is added.
 
 ## Smart exclusion
 
@@ -260,17 +284,24 @@ leading dot is not an extension separator, so `.bashrc` still gets the
 shebang check (reachable with `--hidden`), as does a name with a bare
 trailing dot (`file.`).
 
-## File reading on Linux
+## File reading and concurrency
 
 On Linux kernels with io_uring support (5.15+), `aloc` reads files through
 an [io_uring](https://man7.org/linux/man-pages/man7/io_uring.7.html),
 batching the open/read/close of ~32 files into a few syscalls. Results are
 identical to the standard path; cold-cache scans run 1.7–4× faster on the
-deeper I/O queue, warm-cache scans are unchanged. A startup probe selects
-the backend automatically — where io_uring is unavailable (older kernels,
-container seccomp profiles that block it, `io_uring_disabled`) `aloc`
-silently uses standard reads. Set `ALOC_IO=std` to force standard reads, or
-`ALOC_IO=uring` to insist and warn when the probe fails.
+deeper I/O queue, warm-cache scans are unchanged. A bounded tree preflight
+uses it only when enough files exist to amortize ring setup. Where io_uring is
+unavailable (older kernels, container seccomp profiles that block it,
+`io_uring_disabled`) `aloc` silently uses standard reads. Set `ALOC_IO=std` to
+force standard reads, or `ALOC_IO=uring` to insist and warn when the probe
+fails.
+
+On Linux and macOS, large regular files are counted from read-only mappings
+after an initial buffered probe, avoiding a complete copy without adding a
+metadata call to the small-file path. On macOS, filesystem readers are bounded
+separately from CPU counters to avoid APFS metadata contention while retaining
+parallel parsing.
 
 ## Development
 

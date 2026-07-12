@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -21,6 +22,24 @@ import (
 
 // Version is stamped at build time via -ldflags.
 var Version = "dev"
+
+func versionString() string {
+	moduleVersion := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		moduleVersion = info.Main.Version
+	}
+	return resolveVersion(Version, moduleVersion)
+}
+
+func resolveVersion(stamped, module string) string {
+	if stamped != "" && stamped != "dev" {
+		return strings.TrimPrefix(stamped, "v")
+	}
+	if module != "" && module != "(devel)" {
+		return strings.TrimPrefix(module, "v")
+	}
+	return "dev"
+}
 
 type multiFlag []string
 
@@ -78,7 +97,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *version {
-		fmt.Fprintf(stdout, "aloc %s (%s)\n", Version, runtime.Version())
+		fmt.Fprintf(stdout, "aloc %s (%s)\n", versionString(), runtime.Version())
 		return 0
 	}
 

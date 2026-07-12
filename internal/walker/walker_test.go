@@ -51,6 +51,22 @@ func fixture(t *testing.T) string {
 	return root
 }
 
+func testChdir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+}
+
 func run(t *testing.T, opts Options) *report.Report {
 	t.Helper()
 	if opts.Detect == nil {
@@ -81,7 +97,7 @@ func TestWalkDefaults(t *testing.T) {
 	root := fixture(t)
 	// Excluded paths are reported relative to the root as given on the
 	// command line, so scan from inside the fixture.
-	t.Chdir(root)
+	testChdir(t, root)
 	rep := run(t, Options{Roots: []string{"."}})
 
 	if g := langStats(rep, "Go"); g == nil || g.Files != 1 || g.Code != 2 {
@@ -268,7 +284,7 @@ func TestWalkShebangPolicy(t *testing.T) {
 		traces = append(traces, fmt.Sprintf(format, args...))
 		mu.Unlock()
 	}
-	t.Chdir(root)
+	testChdir(t, root)
 	rep := run(t, Options{Roots: []string{"."}, Hidden: true, Trace: trace})
 
 	if sh := langStats(rep, "Shell"); sh == nil || sh.Files != 3 {
@@ -307,7 +323,7 @@ func TestWalkSmartExclusionOutranksGitignore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Chdir(root)
+	testChdir(t, root)
 	rep := run(t, Options{Roots: []string{"."}})
 	if js := langStats(rep, "JavaScript"); js == nil || js.Files != 1 {
 		t.Errorf("JavaScript = %+v, want 1 file", js)
@@ -353,7 +369,7 @@ func TestWalkTracked(t *testing.T) {
 		}
 	}
 
-	t.Chdir(root)
+	testChdir(t, root)
 	rep := run(t, Options{Roots: []string{"."}, Tracked: true})
 
 	if g := langStats(rep, "Go"); g == nil || g.Files != 1 {
@@ -441,7 +457,7 @@ func TestWalkGitObjectsMatchesTracked(t *testing.T) {
 		t.Errorf("clean blob = %q, want %q", got, want)
 	}
 
-	t.Chdir(root)
+	testChdir(t, root)
 	tracked := run(t, Options{Roots: []string{"."}, Tracked: true, ByFile: true, Dedup: true})
 	objects := run(t, Options{Roots: []string{"."}, GitObjects: true, ByFile: true, Dedup: true})
 	if !reflect.DeepEqual(objects, tracked) {

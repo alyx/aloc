@@ -15,25 +15,53 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: stable
 
       - name: go test
         run: go test ./...
 
-      - name: Build static linux binaries
+      - name: Build release archives
         env:
           CGO_ENABLED: "0"
         run: |
           version="${GITHUB_REF_NAME#v}"
           ldflags="-s -w -X github.com/alyx/aloc/internal/cli.Version=${version}"
-          mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$ldflags" -o "dist/aloc-${version}-linux-x86_64" ./cmd/aloc
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$ldflags" -o "dist/aloc-${version}-linux-aarch64" ./cmd/aloc
+          mkdir -p dist package
+
+          build_archive() {
+            os="$1"
+            arch="$2"
+            platform="$3"
+            base="aloc-${version}-${platform}"
+            dir="package/${base}"
+            binary="aloc"
+            if [ "$os" = windows ]; then
+              binary="aloc.exe"
+            fi
+
+            mkdir -p "$dir"
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$ldflags" -o "$dir/$binary" ./cmd/aloc
+            cp README.md CHANGELOG.md LICENSE "$dir/"
+
+            if [ "$os" = windows ]; then
+              (cd package && zip -qr "../dist/${base}.zip" "$base")
+            else
+              tar -czf "dist/${base}.tar.gz" -C package "$base"
+            fi
+          }
+
+          build_archive linux amd64 linux-x86_64
+          build_archive linux arm64 linux-aarch64
+          build_archive darwin amd64 macos-x86_64
+          build_archive darwin arm64 macos-aarch64
+          build_archive windows amd64 windows-x86_64
+
+          package/aloc-${version}-linux-x86_64/aloc --version | grep -F "aloc ${version} "
 
       - name: Checksums
         run: |
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum *.tar.gz *.zip > SHA256SUMS
 
       - name: Create GitHub release
         env:
