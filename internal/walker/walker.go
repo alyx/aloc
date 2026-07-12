@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -57,6 +56,8 @@ type result struct {
 
 type walker struct {
 	opts    Options
+	trace   bool // opts.Trace != nil; hot skip paths check it before building tracef args
+	useSeen bool // overlap dedup needed: multiple roots or symlink following
 	jobs    chan job
 	results chan result
 
@@ -84,6 +85,8 @@ func Run(opts Options) (*report.Report, error) {
 	}
 	w := &walker{
 		opts:    opts,
+		trace:   opts.Trace != nil,
+		useSeen: len(opts.Roots) > 1 || opts.FollowSymlinks,
 		jobs:    make(chan job, 4*jobs),
 		results: make(chan result, 4*jobs),
 		seen:    map[string]bool{},
@@ -247,9 +250,13 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		return
 	}
 
-	names := make([]string, len(entries))
-	for i, e := range entries {
-		names[i] = e.Name()
+	// The names slice only feeds detection.
+	var names []string
+	if w.opts.Detect != nil {
+		names = make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
 	}
 
 	// A directory whose contents identify it as disposable (a virtualenv, a
@@ -257,8 +264,11 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 	// scan root itself, which the user asked for explicitly.
 	if rel != "" && w.opts.Detect != nil {
 		if d := w.opts.Detect.SelfExcludedBy(filepath.Base(abs), names); d != "" {
-			w.tracef("skip %s (smart: %s)", displayPath(prefix, rel), d)
-			w.recordExcluded(displayPath(prefix, rel), d)
+			disp := displayPath(prefix, rel)
+			if w.trace {
+				w.tracef("skip %s (smart: %s)", disp, d)
+			}
+			w.recordExcluded(disp, d)
 			return
 		}
 	}
@@ -278,15 +288,43 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		scope = w.opts.Detect.Extend(scope, rel, names)
 	}
 
+	// abs and rel are clean by construction (filepath.Abs root plus repeated
+	// name appends), so plain concatenation replaces the Joins' re-Clean.
+	absPre := abs
+	if !strings.HasSuffix(absPre, string(filepath.Separator)) {
+		absPre += string(filepath.Separator)
+	}
+	relPre := ""
+	if rel != "" {
+		relPre = rel + "/"
+	}
+	// Matchers consume pre-split segments: each entry path is split once
+	// here, not per rule set or gitignore stack level. relSegs is shared, so
+	// the per-entry append below must always copy (full-capacity slice).
+	useGit := w.opts.Gitignore && !gs.Empty()
+	needSegs := useGit || scope != nil || !w.opts.Excludes.Empty() || !w.opts.Includes.Empty()
+	var relSegs []string
+	if needSegs && rel != "" {
+		relSegs = strings.Split(rel, "/")
+	}
+	relSegs = relSegs[:len(relSegs):len(relSegs)]
+
 	for _, e := range entries {
 		name := e.Name()
-		erel := path.Join(rel, name)
+		erel := relPre + name
+
+		var segs []string
+		if needSegs {
+			segs = append(relSegs, name)
+		}
 
 		isDir := e.IsDir()
-		childAbs := filepath.Join(abs, name)
+		childAbs := absPre + name
 		if e.Type()&fs.ModeSymlink != 0 {
 			if !w.opts.FollowSymlinks {
-				w.tracef("skip %s (symlink; --follow-symlinks off)", displayPath(prefix, erel))
+				if w.trace {
+					w.tracef("skip %s (symlink; --follow-symlinks off)", displayPath(prefix, erel))
+				}
 				continue
 			}
 			fi, err := os.Stat(childAbs)
@@ -298,15 +336,21 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		}
 
 		if isVCSDir(name) && isDir {
-			w.tracef("skip %s (vcs metadata)", displayPath(prefix, erel))
+			if w.trace {
+				w.tracef("skip %s (vcs metadata)", displayPath(prefix, erel))
+			}
 			continue
 		}
 		if !w.opts.Hidden && strings.HasPrefix(name, ".") {
-			w.tracef("skip %s (hidden; use --hidden to count)", displayPath(prefix, erel))
+			if w.trace {
+				w.tracef("skip %s (hidden; use --hidden to count)", displayPath(prefix, erel))
+			}
 			continue
 		}
-		if pat := w.opts.Excludes.MatchedBy(erel); pat != "" {
-			w.tracef("skip %s (excluded by pattern %q)", displayPath(prefix, erel), pat)
+		if pat := w.opts.Excludes.MatchedByParts(segs); pat != "" {
+			if w.trace {
+				w.tracef("skip %s (excluded by pattern %q)", displayPath(prefix, erel), pat)
+			}
 			continue
 		}
 		// The tracked filter runs before smart detection: untracked trees
@@ -314,11 +358,15 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		// smart-excluded (and attributed) below.
 		if tr != nil {
 			if isDir && !tr.dirs[erel] {
-				w.tracef("skip %s (no git-tracked files)", displayPath(prefix, erel))
+				if w.trace {
+					w.tracef("skip %s (no git-tracked files)", displayPath(prefix, erel))
+				}
 				continue
 			}
 			if !isDir && !tr.files[erel] {
-				w.tracef("skip %s (not tracked by git)", displayPath(prefix, erel))
+				if w.trace {
+					w.tracef("skip %s (not tracked by git)", displayPath(prefix, erel))
+				}
 				continue
 			}
 		}
@@ -326,15 +374,22 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		// directory (node_modules, target, ...) is always attributed to its
 		// detector in the report, even when the project also gitignores it.
 		if isDir && scope != nil {
-			if d := scope.ExcludedBy(erel); d != "" {
-				w.tracef("skip %s (smart: %s)", displayPath(prefix, erel), d)
-				w.recordExcluded(displayPath(prefix, erel), d)
+			if d := scope.ExcludedByParts(segs); d != "" {
+				disp := displayPath(prefix, erel)
+				if w.trace {
+					w.tracef("skip %s (smart: %s)", disp, d)
+				}
+				w.recordExcluded(disp, d)
 				continue
 			}
 		}
-		if w.opts.Gitignore {
-			if ignored, src := gs.IgnoredBy(erel, isDir); ignored {
-				w.tracef("skip %s (gitignored by %s)", displayPath(prefix, erel), src)
+		if useGit {
+			if w.trace {
+				if ignored, src := gs.IgnoredByParts(segs, isDir); ignored {
+					w.tracef("skip %s (gitignored by %s)", displayPath(prefix, erel), src)
+					continue
+				}
+			} else if gs.IgnoredParts(segs, isDir) {
 				continue
 			}
 		}
@@ -362,8 +417,10 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		if !e.Type().IsRegular() && e.Type()&fs.ModeSymlink == 0 {
 			continue // sockets, devices, pipes
 		}
-		if !w.opts.Includes.Empty() && !w.opts.Includes.Matches(erel) {
-			w.tracef("skip %s (no include pattern matches)", displayPath(prefix, erel))
+		if !w.opts.Includes.Empty() && !w.opts.Includes.MatchesParts(segs) {
+			if w.trace {
+				w.tracef("skip %s (no include pattern matches)", displayPath(prefix, erel))
+			}
 			continue
 		}
 		w.dispatch(childAbs, displayPath(prefix, erel))
@@ -393,14 +450,18 @@ func (w *walker) recordExcluded(path, detector string) {
 }
 
 func (w *walker) dispatch(abs, display string) {
-	// Overlapping roots (aloc . ./src) must not double-count.
-	w.mu.Lock()
-	dup := w.seen[abs]
-	w.seen[abs] = true
-	w.mu.Unlock()
-	if dup {
-		w.tracef("skip %s (already counted via another root)", display)
-		return
+	// Overlapping roots (aloc . ./src) must not double-count. With a single
+	// root and no symlink following every path is reached exactly once, so
+	// the map and its lock are skipped.
+	if w.useSeen {
+		w.mu.Lock()
+		dup := w.seen[abs]
+		w.seen[abs] = true
+		w.mu.Unlock()
+		if dup {
+			w.tracef("skip %s (already counted via another root)", display)
+			return
+		}
 	}
 
 	if len(w.opts.Extensions) > 0 {
