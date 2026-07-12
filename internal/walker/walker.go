@@ -61,11 +61,14 @@ type result struct {
 }
 
 type walker struct {
-	opts    Options
-	trace   bool // opts.Trace != nil; hot skip paths check it before building tracef args
-	useSeen bool // overlap dedup needed: multiple roots or symlink following
-	jobs    chan job
-	results chan result
+	opts     Options
+	trace    bool // opts.Trace != nil; hot skip paths check it before building tracef args
+	useSeen  bool // overlap dedup needed: multiple roots or symlink following
+	useUring bool // io_uring read path selected (Linux with kernel support)
+	jobs     chan job
+	results  chan result
+
+	uringWarn sync.Once // a degraded-to-standard-reads warning prints once, not per worker
 
 	// Bounded pool for parallel directory traversal; nil means the walk is
 	// serial. See Run for when parallel traversal is safe.
@@ -93,11 +96,21 @@ func Run(opts Options) (*report.Report, error) {
 		opts:    opts,
 		trace:   opts.Trace != nil,
 		useSeen: len(opts.Roots) > 1 || opts.FollowSymlinks,
-		jobs:    make(chan job, 4*jobs),
 		results: make(chan result, 4*jobs),
 		seen:    map[string]bool{},
 		visited: map[string]bool{},
 	}
+	// On Linux the io_uring read path is the default when a startup probe
+	// confirms kernel support; ALOC_IO=std|uring overrides (see
+	// selectUring). The uring workers drain the jobs channel in batches, so
+	// it must hold several batches or submissions stay far below the batch
+	// size and the I/O depth win evaporates.
+	w.useUring = w.selectUring()
+	jobsBuf := 4 * jobs
+	if w.useUring {
+		jobsBuf = max(jobsBuf, 8*uringBatchHint)
+	}
+	w.jobs = make(chan job, jobsBuf)
 	// The single-goroutine walk is the pipeline's bottleneck on wide trees:
 	// its ReadDir latency inflates under concurrent worker I/O and starves
 	// the workers. A bounded pool of walk goroutines fixes that. The final
@@ -165,6 +178,9 @@ func Run(opts Options) (*report.Report, error) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			if w.useUring && w.uringWorker() {
+				return
+			}
 			// Per-worker scratch buffer, reused across files: content never
 			// escapes countFile. Shrunk after an outsized file so one huge
 			// blob does not pin memory for the rest of the run.
@@ -490,6 +506,10 @@ const (
 	// maxKeepBufSize caps what a worker keeps between files after growing
 	// for an unusually large one.
 	maxKeepBufSize = 4 << 20
+	// uringBatchHint is the io_uring backend's files-per-submission target,
+	// defined here (not in the linux-only file) because Run sizes the jobs
+	// channel with it on every platform.
+	uringBatchHint = 32
 )
 
 // sniffable reports whether a file with basename base qualifies for the
@@ -568,10 +588,17 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		w.warnf("cannot read %s: %v", j.display(), err)
 		return buf
 	}
-	content := buf[:total]
+	w.emitCounted(j, l, buf[:total])
+	return buf
+}
+
+// emitCounted applies the binary check and counts content, sending the
+// result. Shared tail of the standard and io_uring read paths, so both
+// produce byte-identical reports.
+func (w *walker) emitCounted(j job, l *lang.Language, content []byte) {
 	if counter.IsBinary(content) {
 		w.warnf("skipping binary file %s", j.display())
-		return buf
+		return
 	}
 	if w.opts.TraceFiles {
 		w.tracef("count %s (%s)", j.display(), l.Name)
@@ -586,7 +613,6 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		res.hash = sha256.Sum256(content)
 	}
 	w.results <- res
-	return buf
 }
 
 // readFull reads the rest of the file into buf starting at off, growing the
