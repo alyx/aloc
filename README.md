@@ -242,7 +242,12 @@ marker — the same trade-off `cloc`/`scc`/`tokei` make.
 
 Language detection order: exact filename (`Makefile`, `Dockerfile`,
 `CMakeLists.txt`, …), then extension (case-insensitive), then shebang
-(`#!/usr/bin/env python3`, versioned interpreters, `env -S`).
+(`#!/usr/bin/env python3`, versioned interpreters, `env -S`). Only files
+with **no extension** are opened for the shebang check, matching `tokei` and
+`scc` — a file with an unrecognized extension is skipped without a read. A
+leading dot is not an extension separator, so `.bashrc` still gets the
+shebang check (reachable with `--hidden`), as does a name with a bare
+trailing dot (`file.`).
 
 ## Development
 

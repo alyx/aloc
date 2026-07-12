@@ -2,9 +2,12 @@ package walker
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/alyx/aloc/internal/detect"
@@ -194,6 +197,74 @@ func TestWalkSymlinks(t *testing.T) {
 	rep2 := run(t, Options{Roots: []string{root}, FollowSymlinks: true})
 	if g := langStats(rep2, "Go"); g == nil || g.Files != 1 {
 		t.Errorf("symlinks on with cycle: Go files = %+v, want exactly 1 (no dupes, no hang)", g)
+	}
+}
+
+func TestSniffable(t *testing.T) {
+	cases := map[string]bool{
+		"script":      true, // no extension
+		"file.":       true, // trailing dot is not an extension
+		".bashrc":     true, // leading dot is not an extension separator
+		".gitconfig":  true,
+		"Makefile":    true,  // (resolved by filename before sniffing anyway)
+		"run.xyz":     false, // real extension
+		"run.txt":     false,
+		".env.local":  false, // dotfile with a real extension
+		"a.b.c":       false,
+		"file.tar.gz": false,
+	}
+	for base, want := range cases {
+		if got := sniffable(base); got != want {
+			t.Errorf("sniffable(%q) = %v, want %v", base, got, want)
+		}
+	}
+}
+
+// TestWalkShebangPolicy pins the sniff policy: only extensionless files are
+// opened to look for a shebang; an unrecognized extension is skipped outright
+// even if the content has a shebang.
+func TestWalkShebangPolicy(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"bin/tool": "#!/bin/sh\necho hi\n",      // extensionless + shebang: counted
+		"trail.":   "#!/bin/sh\necho hi\n",      // trailing dot = extensionless: counted
+		".bashrc":  "#!/bin/bash\nexport X=1\n", // dotfile, no real extension: counted
+		"run.xyz":  "#!/bin/sh\necho hi\n",      // unknown extension: never opened
+		"notes":    "no shebang here\n",         // extensionless, no shebang: skipped
+	}
+	for path, content := range files {
+		abs := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var mu sync.Mutex
+	var traces []string
+	trace := func(format string, args ...any) {
+		mu.Lock()
+		traces = append(traces, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	t.Chdir(root)
+	rep := run(t, Options{Roots: []string{"."}, Hidden: true, Trace: trace})
+
+	if sh := langStats(rep, "Shell"); sh == nil || sh.Files != 3 {
+		t.Errorf("Shell = %+v, want 3 files (bin/tool, trail., .bashrc)", sh)
+	}
+	if rep.Totals.Files != 3 {
+		t.Errorf("totals = %+v, want exactly the 3 shebang scripts", rep.Totals)
+	}
+	for _, want := range []string{
+		"skip run.xyz (unknown language)",
+		"skip notes (unknown language)",
+	} {
+		if !slices.Contains(traces, want) {
+			t.Errorf("traces missing %q\ngot: %q", want, traces)
+		}
 	}
 }
 
