@@ -3,13 +3,10 @@
 package output
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/alyx/aloc/internal/report"
 )
@@ -34,19 +31,4 @@ func Get(name string) (Formatter, error) {
 	}
 	slices.Sort(names)
 	return nil, fmt.Errorf("unknown format %q (available: %s)", name, strings.Join(names, ", "))
-}
-
-func writeJSON(w io.Writer, r *report.Report) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(r)
-}
-
-func writeYAML(w io.Writer, r *report.Report) error {
-	enc := yaml.NewEncoder(w)
-	enc.SetIndent(2)
-	if err := enc.Encode(r); err != nil {
-		return err
-	}
-	return enc.Close()
 }
