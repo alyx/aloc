@@ -54,8 +54,11 @@ func (p Pattern) String() string { return p.raw }
 // is matched by p — either directly or because an ancestor of rel matches,
 // which gives subtree semantics.
 func (p Pattern) Matches(rel string) bool {
-	parts := splitPath(rel)
-	if parts == nil {
+	return p.matchesParts(splitPath(rel))
+}
+
+func (p Pattern) matchesParts(parts []string) bool {
+	if len(parts) == 0 {
 		return false
 	}
 	if !p.anchored {
@@ -128,13 +131,24 @@ func (s *Set) Matches(rel string) bool {
 	return s.MatchedBy(rel) != ""
 }
 
+// MatchesParts is Matches on pre-split path segments.
+func (s *Set) MatchesParts(parts []string) bool {
+	return s.MatchedByParts(parts) != ""
+}
+
 // MatchedBy returns the raw text of the first pattern matching rel, or "".
 func (s *Set) MatchedBy(rel string) string {
+	return s.MatchedByParts(splitPath(rel))
+}
+
+// MatchedByParts is MatchedBy on pre-split path segments, so a caller
+// consulting several matchers per path splits it once.
+func (s *Set) MatchedByParts(parts []string) string {
 	if s == nil {
 		return ""
 	}
 	for _, p := range s.patterns {
-		if p.Matches(rel) {
+		if p.matchesParts(parts) {
 			return p.raw
 		}
 	}
