@@ -237,6 +237,39 @@ func TestEndToEndTracked(t *testing.T) {
 	}
 }
 
+func TestEndToEndGitObjects(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable:", err)
+	}
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"clean.go":     "package clean\n",
+		"modified.go":  "package before\n",
+		"untracked.go": "package untracked\n",
+	})
+	for _, args := range [][]string{{"init", "-q"}, {"add", "clean.go", "modified.go"}} {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "modified.go"), []byte("package after\n\n// dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, tracked, trackedErr := runCLI(t, root, "--no-config", "--tracked", "--by-file", "-f", "json", ".")
+	code, objects, errOut := runCLI(t, root, "--no-config", "--git", "--by-file", "-f", "json", ".")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if trackedErr != "" || errOut != "" {
+		t.Fatalf("unexpected diagnostics: tracked=%q git=%q", trackedErr, errOut)
+	}
+	if objects != tracked {
+		t.Errorf("--git output differs from --tracked\ngit: %s\ntracked: %s", objects, tracked)
+	}
+}
+
 func TestEndToEndDedup(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{

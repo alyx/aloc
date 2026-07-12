@@ -41,6 +41,7 @@ aloc [flags] [path ...]        # default path: .
 | `--no-detect node,rust` | disable individual detectors |
 | `--no-gitignore` | don't respect `.gitignore` files |
 | `--tracked` | count only files tracked by git (see below) |
+| `--git` | count tracked files using git objects for clean content (see below) |
 | `--dedup` | count only one copy of files with identical content |
 | `--hidden` | count hidden files/directories |
 | `--follow-symlinks` | follow symlinks (loop-safe) |
@@ -151,6 +152,15 @@ are still skipped unless you add `--hidden`, and excludes/includes still
 apply. Git submodule contents are not counted — they belong to their own
 repository's tree.
 
+### `--git`
+
+`--git` applies the same tracked-file filter as `--tracked`, but reads clean
+files from the git object store through a single streaming `git cat-file`
+process per repository. Modified and conflicted files are read from the
+working tree, so its report remains identical to `--tracked`; untracked files
+remain excluded. This substantially reduces per-file filesystem calls on
+large repositories.
+
 ### `--dedup`
 
 `--dedup` counts only one copy of byte-identical files, so copy-pasted or
@@ -173,6 +183,7 @@ format: table
 smart_exclude: true
 gitignore: true
 tracked: false
+git: false
 dedup: false
 hidden: false
 follow_symlinks: false

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -353,6 +354,100 @@ func TestWalkTracked(t *testing.T) {
 	// A root outside any git repository is a hard error.
 	if _, err := Run(Options{Roots: []string{t.TempDir()}, Tracked: true}); err == nil {
 		t.Error("--tracked outside a git repo should fail")
+	}
+}
+
+func TestWalkGitObjectsMatchesTracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable:", err)
+	}
+	root := t.TempDir()
+	files := map[string]string{
+		"clean.go":      "package clean\n\n// clean\nvar N = 1\n",
+		"dirty.go":      "package dirty\nvar N = 1\n",
+		"staged.go":     "package staged\nvar N = 1\n",
+		"tool":          "#!/usr/bin/env python3\nprint('clean')\n",
+		"sub/nested.py": "# nested\nvalue = 1\n",
+		"untracked.go":  "package untracked\n",
+	}
+	for path, content := range files {
+		abs := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("add", "clean.go", "dirty.go", "staged.go", "tool", "sub/nested.py")
+	linked := false
+	if err := os.Symlink("clean.go", filepath.Join(root, "linked.go")); err == nil {
+		git("add", "linked.go")
+		linked = true
+	}
+	if err := os.WriteFile(filepath.Join(root, "dirty.go"), []byte("package dirty\n\n// worktree\nvar N = 200\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "staged.go"), []byte("package staged\n\n// index and worktree\nvar N = 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "staged.go")
+
+	ts, err := gitObjects(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.blobs.Close()
+	if ts.oids["clean.go"] == "" || ts.oids["staged.go"] == "" || ts.oids["tool"] == "" {
+		t.Errorf("clean object IDs missing: %+v", ts.oids)
+	}
+	if ts.oids["dirty.go"] != "" {
+		t.Error("modified file should be routed through the filesystem")
+	}
+	if ts.oids["linked.go"] != "" {
+		t.Error("symlink should be routed through the filesystem")
+	}
+	content, err := ts.blobs.Read(ts.oids["clean.go"], make([]byte, initialBufSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(content), files["clean.go"]; got != want {
+		t.Errorf("clean blob = %q, want %q", got, want)
+	}
+
+	t.Chdir(root)
+	tracked := run(t, Options{Roots: []string{"."}, Tracked: true, ByFile: true, Dedup: true})
+	objects := run(t, Options{Roots: []string{"."}, GitObjects: true, ByFile: true, Dedup: true})
+	if !reflect.DeepEqual(objects, tracked) {
+		t.Errorf("--git report differs from --tracked\nobjects: %#v\ntracked: %#v", objects, tracked)
+	}
+	if tracked.Totals.Files != 5 {
+		t.Errorf("totals = %+v, want five tracked files", tracked.Totals)
+	}
+
+	trackedSub := run(t, Options{Roots: []string{"sub"}, Tracked: true, ByFile: true})
+	objectsSub := run(t, Options{Roots: []string{"sub"}, GitObjects: true, ByFile: true})
+	if !reflect.DeepEqual(objectsSub, trackedSub) {
+		t.Errorf("subdirectory --git report differs from --tracked\nobjects: %#v\ntracked: %#v", objectsSub, trackedSub)
+	}
+	if linked {
+		trackedLinks := run(t, Options{Roots: []string{"."}, Tracked: true, ByFile: true, FollowSymlinks: true})
+		objectLinks := run(t, Options{Roots: []string{"."}, GitObjects: true, ByFile: true, FollowSymlinks: true})
+		if !reflect.DeepEqual(objectLinks, trackedLinks) {
+			t.Errorf("symlink --git report differs from --tracked\nobjects: %#v\ntracked: %#v", objectLinks, trackedLinks)
+		}
+	}
+
+	if _, err := Run(Options{Roots: []string{t.TempDir()}, GitObjects: true}); err == nil {
+		t.Error("--git outside a git repo should fail")
 	}
 }
 
