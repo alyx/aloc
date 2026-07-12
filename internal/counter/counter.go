@@ -5,6 +5,7 @@ package counter
 
 import (
 	"bytes"
+	"sync"
 
 	"github.com/alyx/aloc/internal/lang"
 )
@@ -45,11 +46,62 @@ type state struct {
 	quoteRaw   bool // active multi-line quote is a raw quote (no escapes)
 }
 
+// compiled caches per-language scan tables so the per-byte inner loop can
+// reject ordinary identifier bytes with a single array load instead of
+// prefix-matching every delimiter list.
+type compiled struct {
+	// gate[b] is true when byte b can start any delimiter (line comment,
+	// block comment opener, quote opener) or is ' '/'\t'. Bytes with
+	// gate[b]==false can never change scanner state and are plain code.
+	gate [256]bool
+	// blockClosers[i] is BlockComments[i][1] as []byte for bytes.Index.
+	blockClosers [][]byte
+}
+
+var compiledCache sync.Map // *lang.Language -> *compiled
+
+func compile(l *lang.Language) *compiled {
+	c := &compiled{}
+	c.gate[' '] = true
+	c.gate['\t'] = true
+	mark := func(s string) {
+		if len(s) > 0 {
+			c.gate[s[0]] = true
+		}
+	}
+	for _, lc := range l.LineComments {
+		mark(lc)
+	}
+	for _, p := range l.BlockComments {
+		mark(p[0])
+		c.blockClosers = append(c.blockClosers, []byte(p[1]))
+	}
+	for _, p := range l.MultiQuotes {
+		mark(p[0])
+	}
+	for _, p := range l.RawQuotes {
+		mark(p[0])
+	}
+	for _, p := range l.Quotes {
+		mark(p[0])
+	}
+	return c
+}
+
+func compiledFor(l *lang.Language) *compiled {
+	if c, ok := compiledCache.Load(l); ok {
+		return c.(*compiled)
+	}
+	c, _ := compiledCache.LoadOrStore(l, compile(l))
+	return c.(*compiled)
+}
+
 // Count classifies every line of content according to l. It never fails:
 // malformed input degrades to code lines.
 func Count(content []byte, l *lang.Language) Stats {
 	content = bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM
 
+	cp := compiledFor(l)
 	var st state
 	var s Stats
 	s.Files = 1
@@ -62,10 +114,12 @@ func Count(content []byte, l *lang.Language) Stats {
 			line = content
 			content = nil
 		}
-		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if n := len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
+		}
 
 		s.Lines++
-		switch classify(line, l, &st) {
+		switch classify(line, l, cp, &st) {
 		case kindBlank:
 			s.Blank++
 		case kindComment:
@@ -85,7 +139,7 @@ const (
 	kindBlank
 )
 
-func classify(line []byte, l *lang.Language, st *state) lineKind {
+func classify(line []byte, l *lang.Language, cp *compiled, st *state) lineKind {
 	if len(bytes.TrimSpace(line)) == 0 {
 		return kindBlank
 	}
@@ -117,8 +171,24 @@ scan:
 		if st.blockPair != 0 {
 			hasComment = true
 			pair := l.BlockComments[st.blockPair-1]
+			if !l.Nested {
+				// Depth is always 1: jump straight to the closer.
+				j := bytes.Index(line[i:], cp.blockClosers[st.blockPair-1])
+				if j < 0 {
+					break scan
+				}
+				i += j + len(pair[1])
+				st.blockDepth = 0
+				st.blockPair = 0
+				continue
+			}
+			o0, c0 := pair[0][0], pair[1][0]
 			for i < len(line) {
-				if l.Nested && hasPrefix(line[i:], pair[0]) {
+				if b := line[i]; b != o0 && b != c0 {
+					i++
+					continue
+				}
+				if hasPrefix(line[i:], pair[0]) {
 					st.blockDepth++
 					i += len(pair[0])
 					continue
@@ -138,6 +208,14 @@ scan:
 		}
 
 		c := line[i]
+		// Fast path: bytes that cannot start any delimiter are plain code.
+		// Skip the whole run with one table load per byte.
+		if !cp.gate[c] {
+			hasCode = true
+			for i++; i < len(line) && !cp.gate[line[i]]; i++ {
+			}
+			continue
+		}
 		if c == ' ' || c == '\t' {
 			i++
 			continue
@@ -224,8 +302,45 @@ func hasPrefix(s []byte, prefix string) bool {
 // indexDelim finds delim in s, skipping backslash-escaped occurrences when
 // escapes is true. Returns -1 if not found.
 func indexDelim(s []byte, delim string, escapes bool) int {
+	if len(delim) == 0 {
+		return -1
+	}
+	if !escapes {
+		return bytes.Index(s, []byte(delim))
+	}
+	if delim[0] == '\\' {
+		// A delimiter starting with a backslash is always consumed by the
+		// escape rule; preserve the historical scan behavior.
+		return indexDelimSlow(s, delim)
+	}
+	from := 0
+	for {
+		j := bytes.IndexByte(s[from:], delim[0])
+		if j < 0 {
+			return -1
+		}
+		j += from
+		if j+len(delim) > len(s) {
+			return -1
+		}
+		if string(s[j:j+len(delim)]) == delim {
+			// The forward scan consumes backslashes in pairs, so the
+			// occurrence is escaped iff an odd run precedes it.
+			n := 0
+			for k := j - 1; k >= 0 && s[k] == '\\'; k-- {
+				n++
+			}
+			if n%2 == 0 {
+				return j
+			}
+		}
+		from = j + 1
+	}
+}
+
+func indexDelimSlow(s []byte, delim string) int {
 	for i := 0; i+len(delim) <= len(s); i++ {
-		if escapes && s[i] == '\\' {
+		if s[i] == '\\' {
 			i++ // skip the escaped byte
 			continue
 		}
