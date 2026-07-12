@@ -27,7 +27,8 @@ type Language struct {
 // Registry resolves files to languages.
 type Registry struct {
 	languages map[string]*Language // by name
-	byExt     map[string]*Language
+	byExt     map[uint64]*Language // packed ASCII extensions up to 8 bytes
+	byLongExt map[string]*Language // uncommon long or non-ASCII extensions
 	byName    map[string]*Language // by basename
 	byShebang map[string]*Language
 }
@@ -36,12 +37,16 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{
 		languages: map[string]*Language{},
-		byExt:     map[string]*Language{},
+		byExt:     map[uint64]*Language{},
+		byLongExt: map[string]*Language{},
 		byName:    map[string]*Language{},
 		byShebang: map[string]*Language{},
 	}
 	for i := range builtin {
 		r.Add(&builtin[i])
+	}
+	for i := range builtinExpanded {
+		r.Add(&builtinExpanded[i])
 	}
 	return r
 }
@@ -54,7 +59,11 @@ func (r *Registry) Add(l *Language) {
 	}
 	r.languages[l.Name] = l
 	for _, e := range l.Extensions {
-		r.byExt[strings.ToLower(e)] = l
+		if key, ok := extensionKey(e); ok {
+			r.byExt[key] = l
+		} else {
+			r.byLongExt[strings.ToLower(e)] = l
+		}
 	}
 	for _, n := range l.Filenames {
 		r.byName[n] = l
@@ -66,8 +75,15 @@ func (r *Registry) Add(l *Language) {
 
 func (r *Registry) remove(l *Language) {
 	for _, e := range l.Extensions {
-		if r.byExt[strings.ToLower(e)] == l {
-			delete(r.byExt, strings.ToLower(e))
+		if key, ok := extensionKey(e); ok {
+			if r.byExt[key] == l {
+				delete(r.byExt, key)
+			}
+		} else {
+			ext := strings.ToLower(e)
+			if r.byLongExt[ext] == l {
+				delete(r.byLongExt, ext)
+			}
 		}
 	}
 	for _, n := range l.Filenames {
@@ -113,11 +129,34 @@ func (r *Registry) ByPath(path string) *Language {
 	if l, ok := r.byName[base]; ok {
 		return l
 	}
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(base)), ".")
+	ext := strings.TrimPrefix(filepath.Ext(base), ".")
 	if ext == "" {
 		return nil
 	}
-	return r.byExt[ext]
+	if key, ok := extensionKey(ext); ok {
+		return r.byExt[key]
+	}
+	return r.byLongExt[strings.ToLower(ext)]
+}
+
+// extensionKey packs the overwhelmingly common short ASCII extension into a
+// scalar map key while folding case. This avoids allocating a lowercase string
+// and keeps the expanded language registry cache-friendly on large walks.
+func extensionKey(ext string) (uint64, bool) {
+	if len(ext) == 0 || len(ext) > 8 {
+		return 0, false
+	}
+	var key uint64
+	for i := 0; i < len(ext); i++ {
+		c := ext[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		} else if c >= 0x80 {
+			return 0, false
+		}
+		key |= uint64(c) << (8 * i)
+	}
+	return key, true
 }
 
 // ByShebang detects a language from the first line of content. Returns nil

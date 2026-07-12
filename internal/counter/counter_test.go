@@ -154,6 +154,51 @@ func TestCount(t *testing.T) {
 			src:   "--[[ block\ncomment ]]\nprint('x')\n",
 			blank: 0, comment: 2, code: 1,
 		},
+		{
+			name: "common lisp nested comments", lang: "Common Lisp",
+			src:   "#| outer\n#| inner |#\nstill outer |#\n(print \"; not comment\")\n",
+			blank: 0, comment: 3, code: 1,
+		},
+		{
+			name: "webassembly nested comments", lang: "WebAssembly",
+			src:   "(; outer (; inner ;) outer ;)\n(module)\n;; comment\n",
+			blank: 0, comment: 2, code: 1,
+		},
+		{
+			name: "vhdl comment marker in string", lang: "VHDL",
+			src:   "report \"-- not comment\";\n-- comment\nentity x is end;\n",
+			blank: 0, comment: 1, code: 2,
+		},
+		{
+			name: "visual basic apostrophe comments", lang: "Visual Basic",
+			src:   "Dim s = \"' not comment\"\n' comment\nDim x = 1 ' trailing\n",
+			blank: 0, comment: 1, code: 2,
+		},
+		{
+			name: "nix strings and comments", lang: "Nix",
+			src:   "{ value = \"# not comment\"; }\n/* block\ncomment */\n# line\n",
+			blank: 0, comment: 3, code: 1,
+		},
+		{
+			name: "m4 asymmetric quote", lang: "M4",
+			src:   "define(`value', `# not comment')\ndnl comment\nvalue\n",
+			blank: 0, comment: 1, code: 2,
+		},
+		{
+			name: "asciidoc block comment", lang: "AsciiDoc",
+			src:   "Title\n////\nhidden\n////\ntext\n",
+			blank: 0, comment: 3, code: 2,
+		},
+		{
+			name: "snakemake multiline string", lang: "Snakemake",
+			src:   "rule all:\n    shell: \"\"\"\n      echo '# not comment'\n    \"\"\"\n# comment\n",
+			blank: 0, comment: 1, code: 4,
+		},
+		{
+			name: "stata star comment", lang: "Stata",
+			src:   "* comment\ngenerate x = a * b\n// comment\n",
+			blank: 0, comment: 2, code: 1,
+		},
 	}
 
 	for _, tt := range tests {
