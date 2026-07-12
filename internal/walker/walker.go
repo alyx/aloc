@@ -492,6 +492,16 @@ const (
 	maxKeepBufSize = 4 << 20
 )
 
+// sniffable reports whether a file with basename base qualifies for the
+// shebang sniff: only extensionless names do, matching tokei and scc. A
+// leading dot is not an extension separator (filepath.Ext(".bashrc") is
+// ".bashrc", but the name is extensionless), and a bare trailing dot
+// ("file.") is not an extension either.
+func sniffable(base string) bool {
+	ext := filepath.Ext(strings.TrimPrefix(base, "."))
+	return ext == "" || ext == "."
+}
+
 // countFile reads and counts one file using a single descriptor: the shebang
 // sniff (when needed) and the content read share it, replacing the previous
 // open/read/close + open/fstat/read/read/close sequence. buf is the worker's
@@ -502,8 +512,15 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 	opened := false
 	off := 0
 	if l == nil {
-		// Unknown by name: sniff a small prefix for a shebang on the same
-		// descriptor the content read will continue from.
+		// Unknown by name: a file with an unrecognized extension is skipped
+		// without opening it; only extensionless names are sniffed for a
+		// shebang, on the same descriptor the content read continues from.
+		if !sniffable(filepath.Base(j.abs)) {
+			if w.trace {
+				w.tracef("skip %s (unknown language)", j.display())
+			}
+			return buf
+		}
 		var err error
 		f, err = openRaw(j.abs)
 		if err != nil {
