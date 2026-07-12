@@ -34,6 +34,7 @@ type Options struct {
 	Hidden         bool
 	FollowSymlinks bool
 	Tracked        bool // count only files tracked by git
+	GitObjects     bool // count tracked files, reading clean blobs from git
 	Dedup          bool // count only one copy of identical files
 	Jobs           int
 	ByFile         bool
@@ -46,6 +47,8 @@ type job struct {
 	abs    string
 	prefix string // root as given on the command line, for display
 	erel   string // path relative to the scan root, for display
+	oid    string // clean index blob; empty means read from the filesystem
+	blobs  *gitBatch
 }
 
 // display builds the path shown in output and warnings. Callers build it
@@ -143,12 +146,17 @@ func Run(opts Options) (*report.Report, error) {
 			display = ""
 		}
 		ri := rootInfo{abs: abs, display: display, isDir: fi.IsDir()}
-		if opts.Tracked {
+		if opts.Tracked || opts.GitObjects {
 			dir := abs
 			if !ri.isDir {
 				dir = filepath.Dir(abs)
 			}
-			if ri.tracked, err = gitTracked(dir); err != nil {
+			if opts.GitObjects {
+				ri.tracked, err = gitObjects(dir)
+			} else {
+				ri.tracked, err = gitTracked(dir)
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -207,10 +215,15 @@ func Run(opts Options) (*report.Report, error) {
 			w.tracef("skip %s (not tracked by git)", displayPath(r.display, ""))
 			continue
 		}
-		w.dispatch(r.abs, r.display, "")
+		w.dispatchGit(r.abs, r.display, "", r.tracked, filepath.Base(r.abs))
 	}
 	close(w.jobs)
 	workers.Wait()
+	for _, r := range roots {
+		if r.tracked != nil && r.tracked.blobs != nil {
+			r.tracked.blobs.Close()
+		}
+	}
 	close(w.results)
 	collect.Wait()
 
@@ -445,7 +458,7 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 			}
 			continue
 		}
-		w.dispatch(childAbs, prefix, erel)
+		w.dispatchGit(childAbs, prefix, erel, tr, erel)
 	}
 }
 
@@ -472,6 +485,10 @@ func (w *walker) recordExcluded(path, detector string) {
 }
 
 func (w *walker) dispatch(abs, prefix, erel string) {
+	w.dispatchGit(abs, prefix, erel, nil, "")
+}
+
+func (w *walker) dispatchGit(abs, prefix, erel string, tr *trackedSet, trackedPath string) {
 	// Overlapping roots (aloc . ./src) must not double-count. With a single
 	// root and no symlink following every path is reached exactly once, so
 	// the map and its lock are skipped.
@@ -497,7 +514,12 @@ func (w *walker) dispatch(abs, prefix, erel string) {
 			return
 		}
 	}
-	w.jobs <- job{abs: abs, prefix: prefix, erel: erel}
+	j := job{abs: abs, prefix: prefix, erel: erel}
+	if tr != nil && tr.blobs != nil {
+		j.oid = tr.oids[trackedPath]
+		j.blobs = tr.blobs
+	}
+	w.jobs <- j
 }
 
 const (
@@ -528,6 +550,9 @@ func sniffable(base string) bool {
 // scratch buffer; the (possibly grown) buffer is returned for reuse.
 func (w *walker) countFile(j job, buf []byte) []byte {
 	l := w.opts.Registry.ByPath(j.abs)
+	if j.oid != "" {
+		return w.countGitBlob(j, l, buf)
+	}
 	var f rawFile
 	opened := false
 	off := 0
@@ -613,6 +638,53 @@ func (w *walker) emitCounted(j job, l *lang.Language, content []byte) {
 		res.hash = sha256.Sum256(content)
 	}
 	w.results <- res
+}
+
+func (w *walker) countGitBlob(j job, l *lang.Language, buf []byte) []byte {
+	if l == nil && !sniffable(filepath.Base(j.abs)) {
+		if w.trace {
+			w.tracef("skip %s (unknown language)", j.display())
+		}
+		return buf
+	}
+	content, err := j.blobs.Read(j.oid, buf)
+	if err != nil {
+		w.warnf("cannot read git object for %s: %v; falling back to filesystem", j.display(), err)
+		j.oid = ""
+		return w.countFile(j, buf)
+	}
+	buf = content[:cap(content)]
+	if l == nil {
+		l = w.opts.Registry.ByShebang(content[:min(256, len(content))])
+		if l == nil {
+			if w.trace {
+				w.tracef("skip %s (unknown language)", j.display())
+			}
+			return buf
+		}
+	}
+	if len(w.opts.Languages) > 0 && !w.opts.Languages[strings.ToLower(l.Name)] {
+		if w.trace {
+			w.tracef("skip %s (language %s not selected by --lang)", j.display(), l.Name)
+		}
+		return buf
+	}
+	if counter.IsBinary(content) {
+		w.warnf("skipping binary file %s", j.display())
+		return buf
+	}
+	if w.opts.TraceFiles {
+		w.tracef("count %s (%s)", j.display(), l.Name)
+	}
+	res := result{language: l.Name, stats: counter.Count(content, l)}
+	if w.opts.ByFile || w.opts.Dedup {
+		res.display = j.display()
+	}
+	if w.opts.Dedup {
+		res.hash = sha256.Sum256(content)
+	}
+	w.results <- res
+	return buf
 }
 
 // readFull reads the rest of the file into buf starting at off, growing the
