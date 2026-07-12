@@ -58,6 +58,7 @@ func BenchmarkCount(b *testing.B) {
 	}
 	for _, c := range cases {
 		b.Run(c.name+"/old", func(b *testing.B) { benchCount(b, c.data, c.lang, oldCount) })
+		b.Run(c.name+"/prev", func(b *testing.B) { benchCount(b, c.data, c.lang, prevCount) })
 		b.Run(c.name+"/new", func(b *testing.B) { benchCount(b, c.data, c.lang, Count) })
 	}
 }
