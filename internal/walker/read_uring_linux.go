@@ -3,6 +3,7 @@
 package walker
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,14 +15,54 @@ import (
 	"github.com/alyx/aloc/internal/uring"
 )
 
+// readContinuation preserves a prefix already read by io_uring and fills the
+// remainder through a normal descriptor. Fstat replaces geometric growth and
+// pread avoids copying the prefix from the page cache a second time.
+func readContinuation(path string, prefix, buf []byte) ([]byte, []byte, error) {
+	f, err := openRaw(path)
+	if err != nil {
+		return nil, buf, err
+	}
+	defer f.close()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(f.fd, &st); err != nil || st.Size < int64(len(prefix)) || uint64(st.Size) > uint64(^uint(0)>>1) {
+		// A concurrent shrink or an unusable size falls back to the fully
+		// defensive read loop on the still-unadvanced descriptor.
+		total, grown, readErr := readFull(f, buf, 0)
+		return grown[:total], grown, readErr
+	}
+	size := int(st.Size)
+	if cap(buf) < size {
+		buf = make([]byte, size)
+	} else {
+		buf = buf[:size]
+	}
+	copy(buf, prefix)
+	for total := len(prefix); total < size; {
+		n, readErr := syscall.Pread(f.fd, buf[total:size], int64(total))
+		if readErr == syscall.EINTR {
+			continue
+		}
+		if readErr != nil {
+			return nil, buf, &fs.PathError{Op: "read", Path: path, Err: readErr}
+		}
+		if n == 0 {
+			return nil, buf, io.ErrUnexpectedEOF
+		}
+		total += n
+	}
+	return buf[:size], buf, nil
+}
+
 const (
 	// uringBatchSize files are gathered per submission round. Each round is
 	// three io_uring_enter calls (opens; reads; EOF confirms and closes) in
 	// place of the standard path's ~4 syscalls per file.
 	uringBatchSize = uringBatchHint
 	// uringBufSize is the per-slot read buffer. A file that fills it exactly
-	// may be truncated and is reread through the standard path; nearly all
-	// source files are far smaller.
+	// continues from this prefix through positional reads on a normal
+	// descriptor; nearly all source files are far smaller.
 	uringBufSize = 512 << 10
 	// The busiest round stages two SQEs (EOF confirm, close) per file.
 	uringEntries = 2 * uringBatchSize
@@ -106,6 +147,8 @@ func (w *walker) uringWorker() bool {
 	}
 	slots := make([]slotState, uringBatchSize)
 	bufs := make([][]byte, uringBatchSize)
+	// Allocate the full pool before processing: doing this lazily in the first
+	// hot batch regresses sustained many-file throughput by roughly 10%.
 	for i := range bufs {
 		bufs[i] = make([]byte, uringBufSize)
 	}
@@ -163,7 +206,6 @@ func (w *walker) uringWorker() bool {
 		if n == 0 {
 			continue
 		}
-
 		// Phase 1: open every file into its direct-descriptor slot.
 		for i := 0; i < n; i++ {
 			r.PushOpenDirect(&slots[i].pathBuf[0], i, uint64(i)<<8|udOpen)
@@ -234,23 +276,25 @@ func (w *walker) uringWorker() bool {
 			r.PushCloseDirect(i, uint64(i)<<8|udClose)
 			wait++
 		}
-		cqes, err = r.Enter(wait, cq)
-		if err != nil {
-			w.warnf("io_uring submit failed: %v", err)
-			continue
-		}
-		w.uringReap(r, cqes, func(slot int, tag uint64, res int32) {
-			s := &slots[slot]
-			if tag == udConfirm {
-				if res < 0 {
-					s.readN = -1
-					w.warnf("cannot read %s: %v", s.j.display(),
-						&fs.PathError{Op: "read", Path: s.j.abs, Err: syscall.Errno(-res)})
-				} else if res > 0 {
-					s.reread = true
-				}
+		if wait > 0 {
+			cqes, err = r.Enter(wait, cq)
+			if err != nil {
+				w.warnf("io_uring submit failed: %v", err)
+				continue
 			}
-		})
+			w.uringReap(r, cqes, func(slot int, tag uint64, res int32) {
+				s := &slots[slot]
+				if tag == udConfirm {
+					if res < 0 {
+						s.readN = -1
+						w.warnf("cannot read %s: %v", s.j.display(),
+							&fs.PathError{Op: "read", Path: s.j.abs, Err: syscall.Errno(-res)})
+					} else if res > 0 {
+						s.reread = true
+					}
+				}
+			})
+		}
 
 		for i := 0; i < n; i++ {
 			s := &slots[i]
@@ -259,21 +303,15 @@ func (w *walker) uringWorker() bool {
 			}
 			content := bufs[i][:s.readN]
 			if s.reread || s.readN == len(bufs[i]) {
-				// Buffer filled exactly: the file may be longer. Reread it
-				// whole through the standard path.
-				f, err := openRaw(s.j.abs)
+				// Preserve the ring-read prefix, reopen only for a normal descriptor,
+				// and continue with pread from the known offset. This avoids both the
+				// old reread-from-zero and extra io_uring_enter rounds on large files.
+				var err error
+				content, fallback, err = readContinuation(s.j.abs, content, fallback)
 				if err != nil {
 					w.warnf("cannot read %s: %v", s.j.display(), err)
 					continue
 				}
-				total, fb, err := readFull(f, fallback, 0)
-				f.close()
-				fallback = fb
-				if err != nil {
-					w.warnf("cannot read %s: %v", s.j.display(), err)
-					continue
-				}
-				content = fallback[:total]
 			}
 			l := s.l
 			if l == nil {

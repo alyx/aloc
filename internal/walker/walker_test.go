@@ -1,6 +1,7 @@
 package walker
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -105,6 +106,23 @@ func TestWalkDefaults(t *testing.T) {
 		if wantExcluded[e.Path] != e.Detector {
 			t.Errorf("unexpected exclusion %+v", e)
 		}
+	}
+}
+
+func TestWalkMediumAndMappedFiles(t *testing.T) {
+	root := t.TempDir()
+	medium := bytes.Repeat([]byte("int medium;\n"), 20_000)
+	large := bytes.Repeat([]byte("int large;\n"), 120_000)
+	if err := os.WriteFile(filepath.Join(root, "medium.c"), medium, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "large.c"), large, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := run(t, Options{Roots: []string{root}})
+	c := langStats(rep, "C")
+	if c == nil || c.Files != 2 || c.Lines != 140_000 || c.Code != 140_000 {
+		t.Fatalf("C = %+v, want 2 files / 140000 code lines", c)
 	}
 }
 
@@ -537,5 +555,25 @@ func TestWalkFileRoot(t *testing.T) {
 	rep := run(t, Options{Roots: []string{filepath.Join(root, "main.go")}})
 	if g := langStats(rep, "Go"); g == nil || g.Files != 1 || rep.Totals.Files != 1 {
 		t.Errorf("file root: %+v", rep.Totals)
+	}
+}
+
+func TestUringWorthwhilePreflight(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 8; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%02d.go", i)), []byte("package p\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if uringWorthwhile([]string{root}, false, 16) {
+		t.Fatal("small tree should not select io_uring")
+	}
+	for i := 8; i < 20; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%02d.go", i)), []byte("package p\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !uringWorthwhile([]string{root}, false, 16) {
+		t.Fatal("large tree should select io_uring")
 	}
 }

@@ -130,6 +130,16 @@ func TestCount(t *testing.T) {
 			blank: 0, comment: 0, code: 3,
 		},
 		{
+			name: "device tree comments and strings", lang: "Device Tree",
+			src:   "/dts-v1/;\n\n// board\nnode { compatible = \"vendor,//not-comment\"; /* tail */ };\n/* block\ncomment */\n",
+			blank: 1, comment: 3, code: 2,
+		},
+		{
+			name: "restructured text counts prose and directives as code", lang: "reStructuredText",
+			src:   "Title\n=====\n\n.. note:: text\n",
+			blank: 1, comment: 0, code: 3,
+		},
+		{
 			name: "shell", lang: "Shell",
 			src:   "#!/bin/sh\n# comment\necho 'hi # not comment'\n",
 			blank: 0, comment: 2, code: 1,

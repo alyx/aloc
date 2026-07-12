@@ -63,6 +63,15 @@ type result struct {
 	hash     [sha256.Size]byte // content hash; only filled with Options.Dedup
 }
 
+type loadedFile struct {
+	job      job
+	language *lang.Language
+	buf      []byte
+	reuse    []byte // scratch buffer to return; differs from buf for mmap
+	total    int
+	mapped   bool
+}
+
 type walker struct {
 	opts     Options
 	trace    bool // opts.Trace != nil; hot skip paths check it before building tracef args
@@ -108,7 +117,7 @@ func Run(opts Options) (*report.Report, error) {
 	// selectUring). The uring workers drain the jobs channel in batches, so
 	// it must hold several batches or submissions stay far below the batch
 	// size and the I/O depth win evaporates.
-	w.useUring = w.selectUring()
+	w.useUring = !opts.GitObjects && w.selectUring()
 	jobsBuf := 4 * jobs
 	if w.useUring {
 		jobsBuf = max(jobsBuf, 8*uringBatchHint)
@@ -122,7 +131,7 @@ func Run(opts Options) (*report.Report, error) {
 	// and the symlink-visit outcome would become nondeterministic — so the
 	// walk stays serial whenever any of those is observable.
 	if opts.Trace == nil && opts.Warn == nil && !opts.FollowSymlinks && jobs > 1 {
-		w.walkSem = make(chan struct{}, min(8, jobs))
+		w.walkSem = make(chan struct{}, platformWalkConcurrency(jobs))
 	}
 
 	// Validate roots up front so a bad argument is a hard error, not a warning.
@@ -162,6 +171,15 @@ func Run(opts Options) (*report.Report, error) {
 		}
 		roots = append(roots, ri)
 	}
+	if w.useUring && os.Getenv("ALOC_IO") != "uring" {
+		probeRoots := make([]string, 0, len(roots))
+		for _, r := range roots {
+			probeRoots = append(probeRoots, r.abs)
+		}
+		if !uringWorthwhile(probeRoots, opts.Hidden, uringActivationEntries) {
+			w.useUring = false
+		}
+	}
 
 	// With Dedup, results are buffered and resolved after the walk: workers
 	// finish in arbitrary order, so picking the surviving copy on the fly
@@ -182,24 +200,77 @@ func Run(opts Options) (*report.Report, error) {
 	}()
 
 	var workers sync.WaitGroup
-	for i := 0; i < jobs; i++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			if w.useUring && w.uringWorker() {
-				return
-			}
-			// Per-worker scratch buffer, reused across files: content never
-			// escapes countFile. Shrunk after an outsized file so one huge
-			// blob does not pin memory for the rest of the run.
-			buf := make([]byte, initialBufSize)
-			for j := range w.jobs {
-				buf = w.countFile(j, buf)
-				if len(buf) > maxKeepBufSize {
-					buf = make([]byte, initialBufSize)
+	var readers sync.WaitGroup
+	var loaded chan loadedFile
+	splitIO := platformSplitIO() && !w.useUring && !opts.GitObjects
+	if splitIO {
+		// Darwin's filesystem throughput peaks with fewer concurrent readers
+		// than CPU counters. A buffer pool gives ownership to exactly one
+		// stage at a time and keeps the common small-file path allocation-free.
+		ioJobs := platformIOConcurrency(jobs)
+		loaded = make(chan loadedFile, 4*jobs)
+		buffers := make(chan []byte, ioJobs)
+		for i := 0; i < cap(buffers); i++ {
+			buffers <- make([]byte, initialBufSize)
+		}
+		for i := 0; i < jobs; i++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for f := range loaded {
+					w.emitCounted(f.job, f.language, f.buf[:f.total])
+					if f.mapped {
+						unmapRaw(f.buf)
+					}
+					buffers <- reusableBuffer(f.reuse)
 				}
-			}
-		}()
+			}()
+		}
+		for i := 0; i < ioJobs; i++ {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				for j := range w.jobs {
+					buf := <-buffers
+					l := w.opts.Registry.ByPath(j.abs)
+					f, next, ok := w.readWorktreeFile(j, l, buf)
+					if ok {
+						// For small files, handing a buffer to another goroutine costs
+						// more than counting it while it is still hot in cache. Larger
+						// files go to the full CPU pool so readers can keep issuing I/O.
+						if f.total <= inlineCountSize {
+							w.emitCounted(f.job, f.language, f.buf[:f.total])
+							if f.mapped {
+								unmapRaw(f.buf)
+							}
+							buffers <- reusableBuffer(f.reuse)
+						} else {
+							loaded <- f
+						}
+					} else {
+						buffers <- reusableBuffer(next)
+					}
+				}
+			}()
+		}
+	} else {
+		for i := 0; i < jobs; i++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				if w.useUring && w.uringWorker() {
+					return
+				}
+				// Per-worker scratch buffer, reused across files: content never
+				// escapes countFile. Shrunk after an outsized file so one huge
+				// blob does not pin memory for the rest of the run.
+				buf := make([]byte, initialBufSize)
+				for j := range w.jobs {
+					buf = w.countFile(j, buf)
+					buf = reusableBuffer(buf)
+				}
+			}()
+		}
 	}
 
 	for _, r := range roots {
@@ -218,6 +289,10 @@ func Run(opts Options) (*report.Report, error) {
 		w.dispatchGit(r.abs, r.display, "", r.tracked, filepath.Base(r.abs))
 	}
 	close(w.jobs)
+	if splitIO {
+		readers.Wait()
+		close(loaded)
+	}
 	workers.Wait()
 	for _, r := range roots {
 		if r.tracked != nil && r.tracked.blobs != nil {
@@ -268,6 +343,50 @@ func (w *walker) tracef(format string, args ...any) {
 	w.opts.Trace(format, args...)
 }
 
+// uringWorthwhile performs a bounded metadata-only preflight before workers
+// start. Auto mode pays for rings only when the visible tree is large enough
+// to amortize them; at most limit entries are examined, so large walks repeat
+// only a tiny prefix while small walks avoid ring setup entirely.
+func uringWorthwhile(roots []string, hidden bool, limit int) bool {
+	remaining := limit
+	queue := slices.Clone(roots)
+	for len(queue) > 0 {
+		path := queue[0]
+		queue = queue[1:]
+		dir, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		for {
+			// File.ReadDir(n) stops after n entries and does not sort them. The
+			// preflight therefore never materializes a huge directory just to
+			// reach a small activation threshold.
+			entries, readErr := dir.ReadDir(remaining)
+			for _, entry := range entries {
+				name := entry.Name()
+				if (!hidden && strings.HasPrefix(name, ".")) || (entry.IsDir() && isVCSDir(name)) {
+					continue
+				}
+				remaining--
+				if remaining <= 0 {
+					dir.Close()
+					return true
+				}
+				if entry.IsDir() {
+					queue = append(queue, filepath.Join(path, name))
+				}
+			}
+			if readErr != nil {
+				// The real walk owns diagnostics; a failed estimate merely falls
+				// back to the standard backend. EOF is the normal case.
+				break
+			}
+		}
+		dir.Close()
+	}
+	return false
+}
+
 // walkDir processes one directory. rel is the path relative to the scan
 // root ("" for the root itself); prefix is the root as given on the command
 // line, used only for display.
@@ -284,7 +403,6 @@ func (w *walker) walkDir(abs, prefix, rel string, gs *ignore.GitStack, scope *de
 		w.warnf("cannot read directory %s: %v", displayPath(prefix, rel), err)
 		return
 	}
-
 	// The names slice only feeds detection.
 	var names []string
 	if w.opts.Detect != nil {
@@ -532,6 +650,18 @@ const (
 	// defined here (not in the linux-only file) because Run sizes the jobs
 	// channel with it on every platform.
 	uringBatchHint = 32
+	// Auto mode waits for two full batches before paying for one ring per
+	// worker. The jobs channel is larger than this, so a small walk can finish
+	// and select the standard path without deadlocking.
+	uringActivationEntries = 2 * uringBatchHint
+	// Keep small-file parsing contiguous with its read on Darwin's staged
+	// pipeline. Above this size, separating I/O and counting has enough work
+	// to repay the channel handoff and increases overlap.
+	inlineCountSize = 512
+	// Large regular files are counted directly from a read-only mapping. This
+	// avoids geometric buffer growth and a complete kernel-to-user copy while
+	// keeping mmap setup out of the common small-file path.
+	mmapMinSize = 1 << 20
 )
 
 // sniffable reports whether a file with basename base qualifies for the
@@ -553,6 +683,42 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 	if j.oid != "" {
 		return w.countGitBlob(j, l, buf)
 	}
+	loaded, next, ok := w.readWorktreeFile(j, l, buf)
+	if ok {
+		w.emitCounted(loaded.job, loaded.language, loaded.buf[:loaded.total])
+		if loaded.mapped {
+			unmapRaw(loaded.buf)
+		}
+	}
+	return next
+}
+
+// reusableBuffer prevents a single unusually large file from pinning its
+// allocation in either the per-worker scratch slot or the staged buffer pool.
+func reusableBuffer(buf []byte) []byte {
+	if len(buf) > maxKeepBufSize {
+		return make([]byte, initialBufSize)
+	}
+	return buf
+}
+
+// readWorktreeFile performs path filtering and file I/O but deliberately does
+// not count. Darwin's staged pipeline can therefore bound readers separately
+// from CPU counters; the ordinary worker path calls it synchronously.
+func (w *walker) readWorktreeFile(j job, l *lang.Language, buf []byte) (loadedFile, []byte, bool) {
+	if l == nil && !sniffable(filepath.Base(j.abs)) {
+		// Unknown extensions never need an I/O slot.
+		if w.trace {
+			w.tracef("skip %s (unknown language)", j.display())
+		}
+		return loadedFile{}, buf, false
+	}
+	if l != nil && len(w.opts.Languages) > 0 && !w.opts.Languages[strings.ToLower(l.Name)] {
+		if w.trace {
+			w.tracef("skip %s (language %s not selected by --lang)", j.display(), l.Name)
+		}
+		return loadedFile{}, buf, false
+	}
 	var f rawFile
 	opened := false
 	off := 0
@@ -560,24 +726,18 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		// Unknown by name: a file with an unrecognized extension is skipped
 		// without opening it; only extensionless names are sniffed for a
 		// shebang, on the same descriptor the content read continues from.
-		if !sniffable(filepath.Base(j.abs)) {
-			if w.trace {
-				w.tracef("skip %s (unknown language)", j.display())
-			}
-			return buf
-		}
 		var err error
 		f, err = openRaw(j.abs)
 		if err != nil {
 			w.warnf("cannot read %s: %v", j.display(), err)
-			return buf
+			return loadedFile{}, buf, false
 		}
 		opened = true
 		n, err := f.read(buf[:256])
 		if err != nil {
 			f.close()
 			w.warnf("cannot read %s: %v", j.display(), err)
-			return buf
+			return loadedFile{}, buf, false
 		}
 		l = w.opts.Registry.ByShebang(buf[:n])
 		if l == nil {
@@ -585,18 +745,16 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 			if w.trace {
 				w.tracef("skip %s (unknown language)", j.display())
 			}
-			return buf
+			return loadedFile{}, buf, false
 		}
 		off = n
 	}
-	if len(w.opts.Languages) > 0 && !w.opts.Languages[strings.ToLower(l.Name)] {
-		if opened {
-			f.close()
-		}
+	if opened && len(w.opts.Languages) > 0 && !w.opts.Languages[strings.ToLower(l.Name)] {
+		f.close()
 		if w.trace {
 			w.tracef("skip %s (language %s not selected by --lang)", j.display(), l.Name)
 		}
-		return buf
+		return loadedFile{}, buf, false
 	}
 
 	if !opened {
@@ -604,17 +762,45 @@ func (w *walker) countFile(j job, buf []byte) []byte {
 		f, err = openRaw(j.abs)
 		if err != nil {
 			w.warnf("cannot read %s: %v", j.display(), err)
-			return buf
+			return loadedFile{}, buf, false
 		}
 	}
-	total, buf, err := readFull(f, buf, off)
+	total := off
+	var err error
+	if off == 0 {
+		// First read before fstat: files smaller than the reusable buffer stay
+		// on the minimal open/read/read/close path. Only files that fill it pay
+		// the metadata and mmap setup cost.
+		total, err = f.read(buf)
+		if err == nil && total == len(buf) {
+			mapped, size := mapRaw(f, mmapMinSize)
+			if mapped != nil {
+				f.close()
+				return loadedFile{
+					job: j, language: l, buf: mapped, reuse: buf,
+					total: len(mapped), mapped: true,
+				}, buf, true
+			}
+			// mapRaw has already paid for fstat. Reuse its size to avoid
+			// geometric growth and copies for medium files too small to map.
+			if size >= len(buf) {
+				next := make([]byte, size+1)
+				copy(next, buf)
+				buf = next
+			}
+		}
+		if err == nil {
+			total, buf, err = readFull(f, buf, total)
+		}
+	} else {
+		total, buf, err = readFull(f, buf, off)
+	}
 	f.close()
 	if err != nil {
 		w.warnf("cannot read %s: %v", j.display(), err)
-		return buf
+		return loadedFile{}, buf, false
 	}
-	w.emitCounted(j, l, buf[:total])
-	return buf
+	return loadedFile{job: j, language: l, buf: buf, reuse: buf, total: total}, buf, true
 }
 
 // emitCounted applies the binary check and counts content, sending the

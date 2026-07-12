@@ -45,6 +45,7 @@ def f(x):
 `, 200))
 
 var jsSynthetic = []byte(strings.Repeat("// comment\nconst s = `template\nstring`;\nfunction f(x) { /* c */ return x + 1; }\n\n", 200))
+var plainSynthetic = []byte(strings.Repeat("A paragraph of documentation with ordinary text.\n\n    indented directive content\n", 2000))
 
 func BenchmarkCount(b *testing.B) {
 	cases := []struct {
@@ -55,6 +56,7 @@ func BenchmarkCount(b *testing.B) {
 		{"GoZerrors", "Go", gorootFile(b, "src/syscall/zerrors_linux_amd64.go")},
 		{"Python", "Python", pySynthetic},
 		{"JavaScript", "JavaScript", jsSynthetic},
+		{"PlainText", "Plain Text", plainSynthetic},
 	}
 	for _, c := range cases {
 		b.Run(c.name+"/old", func(b *testing.B) { benchCount(b, c.data, c.lang, oldCount) })

@@ -21,6 +21,23 @@ func TestByPath(t *testing.T) {
 		{"script", ""},
 		{"style.CSS", "CSS"},
 		{"app.test.tsx", "TypeScript"},
+		{"Documentation/core-api/index.rst", "reStructuredText"},
+		{"arch/arm64/boot/dts/vendor/board.dts", "Device Tree"},
+		{"arch/arm64/boot/dts/vendor/soc.dtsi", "Device Tree"},
+		{"Kbuild.in", "Autoconf"},
+		{"scripts/Makefile.am", "Automake"},
+		{"scripts/check.awk", "AWK"},
+		{"tools/testing/BUILD.bazel", "Bazel"},
+		{"tools/perf/Build", "Makefile"},
+		{"net/example.asn1", "ASN.1"},
+		{"arch/x/kernel/vmlinux.lds", "Linker Script"},
+		{"scripts/parser.l", "Lex"},
+		{"scripts/parser.y", "Yacc"},
+		{"po/messages.po", "Gettext Catalog"},
+		{"drivers/example.rules", "udev Rules"},
+		{"features/example.feature", "Gherkin"},
+		{"firmware/image.hex", "Intel HEX"},
+		{"scripts/package/kernel.spec", "RPM Spec"},
 	}
 	for _, tt := range tests {
 		var got string

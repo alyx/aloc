@@ -50,6 +50,9 @@ type state struct {
 // reject ordinary identifier bytes with a single array load instead of
 // prefix-matching every delimiter list.
 type compiled struct {
+	// plainText has no comment or string delimiters, so a vectorized newline
+	// search plus TrimSpace can replace the bytewise state machine entirely.
+	plainText bool
 	// gate[b] is true when byte b can start any delimiter (line comment,
 	// block comment opener, quote opener) or is ' '/'\t'. Bytes with
 	// gate[b]==false can never change scanner state and are plain code.
@@ -76,7 +79,7 @@ const (
 var compiledCache sync.Map // *lang.Language -> *compiled
 
 func compile(l *lang.Language) *compiled {
-	c := &compiled{}
+	c := &compiled{plainText: len(l.LineComments) == 0 && len(l.BlockComments) == 0 && len(l.Quotes) == 0 && len(l.MultiQuotes) == 0 && len(l.RawQuotes) == 0}
 	c.gate[' '] = true
 	c.gate['\t'] = true
 	mark := func(s string) {
@@ -140,6 +143,9 @@ func Count(content []byte, l *lang.Language) Stats {
 	content = bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM
 
 	cp := compiledFor(l)
+	if cp.plainText {
+		return countPlainText(content)
+	}
 	var st state
 	var s Stats
 	s.Files = 1
@@ -384,6 +390,30 @@ scan:
 	}
 	if lineStart < n {
 		s.endLine(content[lineStart:n], sawText, maybeWS, hasCode, hasComment)
+	}
+	return s
+}
+
+// countPlainText handles formats without lexical comments or strings. The
+// standard library's IndexByte uses the platform's optimized byte search,
+// which is substantially faster than consulting a scanner table per byte on
+// documentation and data files while preserving Count's line semantics.
+func countPlainText(content []byte) Stats {
+	s := Stats{Files: 1}
+	for len(content) > 0 {
+		line := content
+		if i := bytes.IndexByte(content, '\n'); i >= 0 {
+			line = content[:i]
+			content = content[i+1:]
+		} else {
+			content = nil
+		}
+		s.Lines++
+		if len(bytes.TrimSpace(line)) == 0 {
+			s.Blank++
+		} else {
+			s.Code++
+		}
 	}
 	return s
 }
