@@ -249,6 +249,18 @@ leading dot is not an extension separator, so `.bashrc` still gets the
 shebang check (reachable with `--hidden`), as does a name with a bare
 trailing dot (`file.`).
 
+## File reading on Linux
+
+On Linux kernels with io_uring support (5.15+), `aloc` reads files through
+an [io_uring](https://man7.org/linux/man-pages/man7/io_uring.7.html),
+batching the open/read/close of ~32 files into a few syscalls. Results are
+identical to the standard path; cold-cache scans run 1.7–4× faster on the
+deeper I/O queue, warm-cache scans are unchanged. A startup probe selects
+the backend automatically — where io_uring is unavailable (older kernels,
+container seccomp profiles that block it, `io_uring_disabled`) `aloc`
+silently uses standard reads. Set `ALOC_IO=std` to force standard reads, or
+`ALOC_IO=uring` to insist and warn when the probe fails.
+
 ## Development
 
 ```sh
